@@ -19,6 +19,7 @@ import {
   FolderPlus,
   Moon,
   Pencil,
+  Pin,
   Plus,
   Save,
   Search,
@@ -50,6 +51,7 @@ const makeRequest = (name = "新请求", url = "") => ({
   formData: [pair()],
   postScript: defaultPostScript,
   batchData: "",
+  pinned: false,
 });
 
 const defaultWorkspace = () => {
@@ -188,7 +190,9 @@ const filteredCollections = computed(() => {
     .filter((collection) => collection.name.toLowerCase().includes(query) || collection.requests.length);
 });
 
-const activeRequests = (collection) => collection.requests.filter((request) => !request.archived);
+const activeRequests = (collection) => collection.requests
+  .filter((request) => !request.archived)
+  .sort((left, right) => Number(Boolean(right.pinned)) - Number(Boolean(left.pinned)));
 const archivedRequests = (collection) => collection.requests.filter((request) => request.archived);
 
 const variableHierarchy = computed(() => {
@@ -338,10 +342,24 @@ function moveRequest(collection, request, direction) {
   const siblings = activeRequests(target);
   const siblingIndex = siblings.findIndex((item) => item.id === request.id);
   const nextSibling = siblings[siblingIndex + direction];
-  if (siblingIndex < 0 || !nextSibling) return;
+  if (siblingIndex < 0 || !nextSibling || Boolean(nextSibling.pinned) !== Boolean(request.pinned)) return;
   const index = target.requests.findIndex((item) => item.id === request.id);
   const nextIndex = target.requests.findIndex((item) => item.id === nextSibling.id);
   [target.requests[index], target.requests[nextIndex]] = [target.requests[nextIndex], target.requests[index]];
+}
+
+function canMoveRequest(collection, request, direction) {
+  const siblings = activeRequests(collection);
+  const index = siblings.findIndex((item) => item.id === request.id);
+  const next = siblings[index + direction];
+  return Boolean(next) && Boolean(next.pinned) === Boolean(request.pinned);
+}
+
+function togglePinRequest(collection, request) {
+  const target = workspace.collections
+    .find((item) => item.id === collection.id)
+    ?.requests.find((item) => item.id === request.id);
+  if (target) target.pinned = !target.pinned;
 }
 
 function selectFirstRequest() {
@@ -528,6 +546,7 @@ function normalizeWorkspace(saved) {
     const inheritedPostScript = collection.postScript;
     collection.requests.forEach((request) => {
       request.archived ??= false;
+      request.pinned ??= false;
       request.params ||= [pair()];
       request.headers ||= [pair()];
       request.bodyType ||= "none";
@@ -1219,7 +1238,7 @@ onBeforeUnmount(() => {
         </div>
         <label class="search-box"><Search :size="15" /><input v-model="searchText" placeholder="搜索请求" /></label>
         <div class="collection-list">
-          <section v-for="collection in filteredCollections" :key="collection.id" class="collection">
+          <section v-for="collection in filteredCollections" :key="collection.id" class="collection" :class="{ 'has-selected-request': collection.requests.some((request) => request.id === workspace.selectedRequestId) }">
             <div class="collection-row">
               <button class="collapse-button" @click="collection.expanded = !collection.expanded">
                 <ChevronDown v-if="collection.expanded" :size="15" /><ChevronRight v-else :size="15" />
@@ -1245,14 +1264,15 @@ onBeforeUnmount(() => {
                 v-for="request in activeRequests(collection)"
                 :key="request.id"
                 class="request-item"
-                :class="{ active: request.id === workspace.selectedRequestId }"
+                :class="{ active: request.id === workspace.selectedRequestId, pinned: request.pinned }"
                 @click="selectRequest(request)"
               >
                 <span class="method-label" :class="methodClass(request.method)">{{ request.method }}</span>
-                <span class="request-item-name">{{ request.name }}</span>
+                <span class="request-item-name"><span>{{ request.name }}</span><Pin v-if="request.pinned" :size="11" class="pinned-indicator" /></span>
                 <span class="request-actions">
-                  <span class="request-action" :class="{ disabled: activeRequests(collection)[0]?.id === request.id }" title="上移" @click.stop="moveRequest(collection, request, -1)"><ArrowUp :size="13" /></span>
-                  <span class="request-action" :class="{ disabled: activeRequests(collection).at(-1)?.id === request.id }" title="下移" @click.stop="moveRequest(collection, request, 1)"><ArrowDown :size="13" /></span>
+                  <span class="request-action" :class="{ disabled: !canMoveRequest(collection, request, -1) }" title="上移" @click.stop="moveRequest(collection, request, -1)"><ArrowUp :size="13" /></span>
+                  <span class="request-action" :class="{ disabled: !canMoveRequest(collection, request, 1) }" title="下移" @click.stop="moveRequest(collection, request, 1)"><ArrowDown :size="13" /></span>
+                  <span class="request-action pin-action" :class="{ active: request.pinned }" :title="request.pinned ? '取消置顶' : '置顶请求'" @click.stop="togglePinRequest(collection, request)"><Pin :size="13" /></span>
                   <span class="request-action" title="归档请求" @click.stop="archiveRequest(collection, request)"><Archive :size="13" /></span>
                   <span class="request-action danger" title="删除请求" @click.stop="removeRequest(collection, request)"><X :size="13" /></span>
                 </span>
@@ -1308,12 +1328,12 @@ onBeforeUnmount(() => {
           <div class="request-title-row">
             <label class="editable-title request-title-edit" title="点击修改接口名称">
               <Pencil :size="13" class="edit-indicator" />
-              <input v-model="selectedRequest.name" class="request-name" aria-label="接口名称" placeholder="接口名称" />
+              <input v-model="selectedRequest.name" class="request-name" aria-label="接口名称" placeholder="接口名称" @focus="$event.currentTarget.select()" />
             </label>
             <span class="title-divider"></span>
             <label v-if="selectedCollection" class="editable-title collection-title-edit" title="点击修改分组名称">
               <Pencil :size="13" class="edit-indicator" />
-              <input v-model="selectedCollection.name" class="collection-path" aria-label="分组名称" placeholder="分组名称" />
+              <input v-model="selectedCollection.name" class="collection-path" aria-label="分组名称" placeholder="分组名称" @focus="$event.currentTarget.select()" />
             </label>
             <span v-if="selectedRequest.archived" class="archived-badge"><Archive :size="13" />已归档</span>
           </div>
