@@ -61,7 +61,7 @@ const makeRequest = (name = "新请求", url = "") => ({
 const defaultWorkspace = () => {
   const request = makeRequest("示例请求", "https://httpbin.org/get");
   return {
-    collections: [{ id: uid(), name: "我的接口", expanded: true, preScript: defaultPreScript, requests: [request] }],
+    collections: [{ id: uid(), name: "我的接口", expanded: true, preScript: defaultPreScript, requests: [request], groups: [] }],
     selectedRequestId: request.id,
     variables: [pair("baseUrl", "https://httpbin.org")],
     proxy: { enabled: false, url: "http://127.0.0.1:7890", username: "", password: "" },
@@ -111,6 +111,7 @@ const variableDraftKey = ref("");
 const variableDraftValue = ref("");
 const namespaceDraft = ref("");
 const collapsedNamespaces = reactive({});
+const collapsedSettings = reactive({ theme: true, accent: true, mcp: true, proxy: true, variables: false });
 const confirmDialog = reactive({
   open: false,
   title: "",
@@ -169,19 +170,33 @@ function resolveConfirm(result) {
 
 const isTauri = () => Boolean(window.__TAURI_INTERNALS__);
 
-const selectedRequest = computed(() => {
+const requestContainers = (collection) => [collection, ...(collection.groups || [])];
+const collectionRequests = (collection) => requestContainers(collection).flatMap((group) => group.requests || []);
+
+function findRequestLocation(requestId) {
   for (const collection of workspace.collections) {
-    const request = collection.requests.find((item) => item.id === workspace.selectedRequestId);
-    if (request) return request;
+    for (const group of requestContainers(collection)) {
+      const request = group.requests.find((item) => item.id === requestId);
+      if (request) return { collection, group, request };
+    }
   }
   return null;
-});
+}
 
-const selectedCollection = computed(() =>
-  workspace.collections.find((collection) =>
-    collection.requests.some((request) => request.id === workspace.selectedRequestId),
-  ),
-);
+function resolveRequestGroup(group) {
+  for (const collection of workspace.collections) {
+    if (collection.id === group.id) return collection;
+    const child = (collection.groups || []).find((item) => item.id === group.id);
+    if (child) return child;
+  }
+  return group;
+}
+
+const selectedRequestLocation = computed(() => findRequestLocation(workspace.selectedRequestId));
+const selectedRequest = computed(() => selectedRequestLocation.value?.request || null);
+
+const selectedCollection = computed(() => selectedRequestLocation.value?.collection || null);
+const selectedRequestGroup = computed(() => selectedRequestLocation.value?.group || null);
 
 const scriptCollection = computed(() =>
   workspace.collections.find((collection) => collection.id === scriptCollectionId.value),
@@ -191,15 +206,21 @@ const filteredCollections = computed(() => {
   const query = searchText.value.trim().toLowerCase();
   if (!query) return workspace.collections;
   return workspace.collections
-    .map((collection) => ({
-      ...collection,
-      expanded: true,
-      requests: collection.requests.filter(
-        (request) =>
-          request.name.toLowerCase().includes(query) || request.url.toLowerCase().includes(query),
-      ),
-    }))
-    .filter((collection) => collection.name.toLowerCase().includes(query) || collection.requests.length);
+    .map((collection) => {
+      const collectionMatches = collection.name.toLowerCase().includes(query);
+      const requests = collectionMatches ? collection.requests : collection.requests.filter(
+        (request) => request.name.toLowerCase().includes(query) || request.url.toLowerCase().includes(query),
+      );
+      const groups = (collection.groups || []).map((group) => {
+        const groupMatches = group.name.toLowerCase().includes(query);
+        const groupRequests = collectionMatches || groupMatches ? group.requests : group.requests.filter(
+          (request) => request.name.toLowerCase().includes(query) || request.url.toLowerCase().includes(query),
+        );
+        return { ...group, expanded: true, requests: groupRequests };
+      }).filter((group) => collectionMatches || group.name.toLowerCase().includes(query) || group.requests.length);
+      return { ...collection, expanded: true, requests, groups };
+    })
+    .filter((collection) => collection.name.toLowerCase().includes(query) || collection.requests.length || collection.groups.length);
 });
 
 const activeRequests = (collection) => collection.requests
@@ -258,9 +279,35 @@ const selectedBatchResult = computed(() =>
 );
 
 function addCollection() {
-  const collection = { id: uid(), name: `新集合 ${workspace.collections.length + 1}`, expanded: true, preScript: defaultPreScript, requests: [] };
+  const collection = { id: uid(), name: `新集合 ${workspace.collections.length + 1}`, expanded: true, preScript: defaultPreScript, requests: [], groups: [] };
   workspace.collections.push(collection);
   beginRenameCollection(collection);
+}
+
+function addSubgroup(collection) {
+  const target = workspace.collections.find((item) => item.id === collection.id);
+  if (!target) return;
+  const group = { id: uid(), name: `新分组 ${(target.groups || []).length + 1}`, expanded: true, archiveExpanded: false, requests: [] };
+  target.groups ||= [];
+  target.groups.push(group);
+  target.expanded = true;
+  beginRenameCollection(group);
+}
+
+async function removeSubgroup(collection, group) {
+  const target = workspace.collections.find((item) => item.id === collection.id);
+  const actual = target?.groups?.find((item) => item.id === group.id);
+  if (!actual) return;
+  const confirmed = await askConfirm({
+    title: "删除二级分组",
+    message: `将删除“${actual.name}”及其中所有请求，此操作无法撤销。`,
+    confirmLabel: "删除分组",
+  });
+  if (!confirmed) return;
+  const requestIds = actual.requests.map((request) => request.id);
+  target.groups = target.groups.filter((item) => item.id !== actual.id);
+  if (requestIds.includes(workspace.selectedRequestId)) selectFirstRequest();
+  requestIds.forEach((id) => requestSessions.delete(id));
 }
 
 function beginRenameCollection(collection) {
@@ -289,67 +336,67 @@ async function removeCollection(collection) {
     confirmLabel: "删除集合",
   });
   if (!confirmed) return;
-  const removedRequestIds = collection.requests.map((request) => request.id);
-  const wasSelected = collection.requests.some((request) => request.id === workspace.selectedRequestId);
+  const removedRequestIds = collectionRequests(collection).map((request) => request.id);
+  const wasSelected = removedRequestIds.includes(workspace.selectedRequestId);
   workspace.collections = workspace.collections.filter((item) => item.id !== collection.id);
   if (wasSelected) selectFirstRequest();
   removedRequestIds.forEach((id) => requestSessions.delete(id));
 }
 
-function addRequest(collection = selectedCollection.value || workspace.collections[0]) {
-  if (collection) {
-    collection = workspace.collections.find((item) => item.id === collection.id) || collection;
+function addRequest(group = selectedRequestGroup.value || selectedCollection.value || workspace.collections[0]) {
+  if (group) {
+    group = resolveRequestGroup(group);
   }
-  if (!collection) {
-    collection = { id: uid(), name: "我的接口", expanded: true, preScript: defaultPreScript, requests: [] };
-    workspace.collections.push(collection);
+  if (!group) {
+    group = { id: uid(), name: "我的接口", expanded: true, preScript: defaultPreScript, requests: [], groups: [] };
+    workspace.collections.push(group);
   }
-  const previousRequest = activeRequests(collection).at(-1);
+  const previousRequest = activeRequests(group).at(-1);
   const request = makeRequest("新请求", previousRequest?.url || "");
   if (previousRequest) {
     request.method = previousRequest.method;
     syncParamsFromUrl(request);
   }
-  collection.requests.push(request);
-  collection.expanded = true;
+  group.requests.push(request);
+  group.expanded = true;
   changeSelectedRequest(request.id);
   nextTick(() => document.querySelector(".request-name")?.select());
 }
 
-function archiveRequest(collection, request) {
-  const target = workspace.collections.find((item) => item.id === collection.id);
+function archiveRequest(group, request) {
+  const target = resolveRequestGroup(group);
   const targetRequest = target?.requests.find((item) => item.id === request.id);
   if (!targetRequest) return;
   targetRequest.archived = true;
   target.archiveExpanded = true;
 }
 
-function restoreRequest(collection, request) {
-  const target = workspace.collections.find((item) => item.id === collection.id);
+function restoreRequest(group, request) {
+  const target = resolveRequestGroup(group);
   const targetRequest = target?.requests.find((item) => item.id === request.id);
   if (targetRequest) targetRequest.archived = false;
 }
 
-function toggleArchive(collection) {
-  const target = workspace.collections.find((item) => item.id === collection.id);
+function toggleArchive(group) {
+  const target = resolveRequestGroup(group);
   if (target) target.archiveExpanded = !target.archiveExpanded;
 }
 
-async function removeRequest(collection, request) {
-  collection = workspace.collections.find((item) => item.id === collection.id) || collection;
+async function removeRequest(group, request) {
+  group = resolveRequestGroup(group);
   const confirmed = await askConfirm({
     title: "删除请求",
     message: `将永久删除请求“${request.name}”。`,
     confirmLabel: "删除请求",
   });
   if (!confirmed) return;
-  collection.requests = collection.requests.filter((item) => item.id !== request.id);
+  group.requests = group.requests.filter((item) => item.id !== request.id);
   if (workspace.selectedRequestId === request.id) selectFirstRequest();
   requestSessions.delete(request.id);
 }
 
-function moveRequest(collection, request, direction) {
-  const target = workspace.collections.find((item) => item.id === collection.id);
+function moveRequest(group, request, direction) {
+  const target = resolveRequestGroup(group);
   if (!target) return;
   const siblings = activeRequests(target);
   const siblingIndex = siblings.findIndex((item) => item.id === request.id);
@@ -360,22 +407,20 @@ function moveRequest(collection, request, direction) {
   [target.requests[index], target.requests[nextIndex]] = [target.requests[nextIndex], target.requests[index]];
 }
 
-function canMoveRequest(collection, request, direction) {
-  const siblings = activeRequests(collection);
+function canMoveRequest(group, request, direction) {
+  const siblings = activeRequests(group);
   const index = siblings.findIndex((item) => item.id === request.id);
   const next = siblings[index + direction];
   return Boolean(next) && Boolean(next.pinned) === Boolean(request.pinned);
 }
 
-function togglePinRequest(collection, request) {
-  const target = workspace.collections
-    .find((item) => item.id === collection.id)
-    ?.requests.find((item) => item.id === request.id);
+function togglePinRequest(group, request) {
+  const target = resolveRequestGroup(group)?.requests.find((item) => item.id === request.id);
   if (target) target.pinned = !target.pinned;
 }
 
 function selectFirstRequest() {
-  const requests = workspace.collections.flatMap((item) => item.requests);
+  const requests = workspace.collections.flatMap(collectionRequests);
   changeSelectedRequest(requests.find((request) => !request.archived)?.id || requests[0]?.id || "");
 }
 
@@ -557,9 +602,17 @@ function normalizeWorkspace(saved) {
   saved.collections.forEach((collection) => {
     collection.expanded ??= true;
     collection.archiveExpanded ??= false;
-    collection.preScript ||= collection.requests.find((request) => request.preScript)?.preScript || defaultPreScript;
+    collection.requests ||= [];
+    collection.groups ||= [];
+    collection.groups.forEach((group) => {
+      group.expanded ??= true;
+      group.archiveExpanded ??= false;
+      group.requests ||= [];
+      delete group.preScript;
+    });
+    collection.preScript ||= collectionRequests(collection).find((request) => request.preScript)?.preScript || defaultPreScript;
     const inheritedPostScript = collection.postScript;
-    collection.requests.forEach((request) => {
+    collectionRequests(collection).forEach((request) => {
       request.archived ??= false;
       request.pinned ??= false;
       request.params ||= [pair()];
@@ -1028,16 +1081,9 @@ async function sendRequest() {
 }
 
 async function executeMcpRequest({ requestId, variables = {} }) {
-  let collection;
-  let request;
-  for (const candidate of workspace.collections) {
-    const matched = candidate.requests.find((item) => item.id === requestId);
-    if (matched) {
-      collection = candidate;
-      request = matched;
-      break;
-    }
-  }
+  const location = findRequestLocation(requestId);
+  const collection = location?.collection;
+  const request = location?.request;
   if (!request) throw new Error(`未找到请求：${requestId}`);
   const hasOverrides = variables && Object.keys(variables).length > 0;
   const source = hasOverrides ? applyBatchOverrides(request, variables) : request;
@@ -1381,7 +1427,7 @@ onBeforeUnmount(() => {
         </div>
         <label class="search-box"><Search :size="15" /><input v-model="searchText" placeholder="搜索请求" /></label>
         <div class="collection-list">
-          <section v-for="collection in filteredCollections" :key="collection.id" class="collection" :class="{ 'has-selected-request': collection.requests.some((request) => request.id === workspace.selectedRequestId) }">
+          <section v-for="collection in filteredCollections" :key="collection.id" class="collection" :class="{ 'has-selected-request': collectionRequests(collection).some((request) => request.id === workspace.selectedRequestId) }">
             <div class="collection-row">
               <button class="collapse-button" @click="collection.expanded = !collection.expanded">
                 <ChevronDown v-if="collection.expanded" :size="15" /><ChevronRight v-else :size="15" />
@@ -1396,9 +1442,10 @@ onBeforeUnmount(() => {
                 @keydown.enter.prevent="$event.currentTarget.blur()"
               />
               <button v-else class="collection-name" @dblclick="beginRenameCollection(collection)">{{ collection.name }}</button>
-              <span class="count">{{ activeRequests(collection).length }}</span>
+              <span class="count">{{ collectionRequests(collection).filter((request) => !request.archived).length }}</span>
               <button class="row-action" title="重命名集合" @click="beginRenameCollection(collection)"><Pencil :size="13" /></button>
               <button class="row-action" title="集合脚本" @click="openCollectionScript(collection)"><Code2 :size="14" /></button>
+              <button class="row-action" title="添加二级分组" @click="addSubgroup(collection)"><FolderPlus :size="14" /></button>
               <button class="row-action" title="添加请求" @click="addRequest(collection)"><Plus :size="15" /></button>
               <button class="row-action danger" title="删除集合" @click="removeCollection(collection)"><Trash2 :size="14" /></button>
             </div>
@@ -1420,7 +1467,7 @@ onBeforeUnmount(() => {
                   <span class="request-action danger" title="删除请求" @click.stop="removeRequest(collection, request)"><X :size="13" /></span>
                 </span>
               </button>
-              <div v-if="!activeRequests(collection).length" class="empty-group">暂无活跃请求</div>
+              <div v-if="!activeRequests(collection).length && !collection.groups.length" class="empty-group">暂无活跃请求</div>
               <div v-if="archivedRequests(collection).length" class="archive-section">
                 <button class="archive-heading" @click="toggleArchive(collection)">
                   <ChevronDown v-if="collection.archiveExpanded || searchText.trim()" :size="13" />
@@ -1446,6 +1493,61 @@ onBeforeUnmount(() => {
                   </button>
                 </div>
               </div>
+              <section v-for="group in collection.groups" :key="group.id" class="subcollection" :class="{ active: group.requests.some((request) => request.id === workspace.selectedRequestId) }">
+                <div class="subcollection-row">
+                  <button class="collapse-button" @click="group.expanded = !group.expanded"><ChevronDown v-if="group.expanded" :size="15" /><ChevronRight v-else :size="15" /></button>
+                  <Folder :size="16" class="folder-icon" />
+                  <input
+                    v-if="editingCollectionId === group.id"
+                    v-model="group.name"
+                    class="collection-name-input"
+                    :data-collection-edit="group.id"
+                    @blur="finishRenameCollection(group)"
+                    @keydown.enter.prevent="$event.currentTarget.blur()"
+                  />
+                  <button v-else class="collection-name" @dblclick="beginRenameCollection(group)">{{ group.name }}</button>
+                  <span class="count">{{ activeRequests(group).length }}</span>
+                  <button class="row-action" title="重命名分组" @click="beginRenameCollection(group)"><Pencil :size="12" /></button>
+                  <button class="row-action" title="添加请求" @click="addRequest(group)"><Plus :size="14" /></button>
+                  <button class="row-action danger" title="删除二级分组" @click="removeSubgroup(collection, group)"><Trash2 :size="13" /></button>
+                </div>
+                <div v-if="group.expanded" class="subrequest-list">
+                  <button
+                    v-for="request in activeRequests(group)"
+                    :key="request.id"
+                    class="request-item"
+                    :class="{ active: request.id === workspace.selectedRequestId, pinned: request.pinned }"
+                    @click="selectRequest(request)"
+                  >
+                    <span class="method-label" :class="methodClass(request.method)">{{ request.method }}</span>
+                    <span class="request-item-name"><span>{{ request.name }}</span><Pin v-if="request.pinned" :size="11" class="pinned-indicator" /></span>
+                    <span class="request-actions">
+                      <span class="request-action" :class="{ disabled: !canMoveRequest(group, request, -1) }" title="上移" @click.stop="moveRequest(group, request, -1)"><ArrowUp :size="13" /></span>
+                      <span class="request-action" :class="{ disabled: !canMoveRequest(group, request, 1) }" title="下移" @click.stop="moveRequest(group, request, 1)"><ArrowDown :size="13" /></span>
+                      <span class="request-action pin-action" :class="{ active: request.pinned }" :title="request.pinned ? '取消置顶' : '置顶请求'" @click.stop="togglePinRequest(group, request)"><Pin :size="13" /></span>
+                      <span class="request-action" title="归档请求" @click.stop="archiveRequest(group, request)"><Archive :size="13" /></span>
+                      <span class="request-action danger" title="删除请求" @click.stop="removeRequest(group, request)"><X :size="13" /></span>
+                    </span>
+                  </button>
+                  <div v-if="!activeRequests(group).length" class="empty-group">暂无活跃请求</div>
+                  <div v-if="archivedRequests(group).length" class="archive-section">
+                    <button class="archive-heading" @click="toggleArchive(group)">
+                      <ChevronDown v-if="group.archiveExpanded || searchText.trim()" :size="13" /><ChevronRight v-else :size="13" />
+                      <Archive :size="13" /><span>归档</span><span class="archive-count">{{ archivedRequests(group).length }}</span>
+                    </button>
+                    <div v-if="group.archiveExpanded || searchText.trim()" class="archive-list">
+                      <button v-for="request in archivedRequests(group)" :key="request.id" class="request-item archived" :class="{ active: request.id === workspace.selectedRequestId }" @click="selectRequest(request)">
+                        <span class="method-label" :class="methodClass(request.method)">{{ request.method }}</span>
+                        <span class="request-item-name"><span>{{ request.name }}</span></span>
+                        <span class="request-actions">
+                          <span class="request-action" title="恢复请求" @click.stop="restoreRequest(group, request)"><ArchiveRestore :size="13" /></span>
+                          <span class="request-action danger" title="删除请求" @click.stop="removeRequest(group, request)"><X :size="13" /></span>
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </section>
             </div>
           </section>
         </div>
@@ -1474,9 +1576,10 @@ onBeforeUnmount(() => {
               <input v-model="selectedRequest.name" class="request-name" aria-label="接口名称" placeholder="接口名称" @focus="$event.currentTarget.select()" />
             </label>
             <span class="title-divider"></span>
-            <label v-if="selectedCollection" class="editable-title collection-title-edit" title="点击修改分组名称">
+            <label v-if="selectedRequestGroup" class="editable-title collection-title-edit" title="点击修改分组名称">
               <Pencil :size="13" class="edit-indicator" />
-              <input v-model="selectedCollection.name" class="collection-path" aria-label="分组名称" placeholder="分组名称" @focus="$event.currentTarget.select()" />
+              <span v-if="selectedRequestGroup.id !== selectedCollection.id" class="group-parent-path">{{ selectedCollection.name }} /</span>
+              <input v-model="selectedRequestGroup.name" class="collection-path" aria-label="分组名称" placeholder="分组名称" @focus="$event.currentTarget.select()" />
             </label>
             <span v-if="selectedRequest.archived" class="archived-badge"><Archive :size="13" />已归档</span>
           </div>
@@ -1676,16 +1779,16 @@ onBeforeUnmount(() => {
       <section class="settings-panel" :style="{ width: `${workspace.appearance.settingsWidth || 520}px` }">
         <header><div><span class="eyebrow">WORKSPACE</span><h2>设置</h2></div><button class="icon-button" title="关闭" @click="settingsOpen = false"><X :size="19" /></button></header>
         <div class="settings-content">
-          <div class="setting-section">
-            <div class="setting-title"><div><h3>主题模式</h3><p>默认使用柔和浅色主题</p></div></div>
-            <div class="theme-mode-control">
+          <div class="setting-section" :class="{ collapsed: collapsedSettings.theme }">
+            <div class="setting-title"><button class="setting-title-toggle" @click="collapsedSettings.theme = !collapsedSettings.theme"><ChevronRight v-if="collapsedSettings.theme" :size="16" /><ChevronDown v-else :size="16" /><div><h3>主题模式</h3><p>默认使用柔和浅色主题</p></div></button></div>
+            <div v-if="!collapsedSettings.theme" class="theme-mode-control">
               <button :class="{ active: workspace.appearance.mode === 'light' }" @click="workspace.appearance.mode = 'light'"><Sun :size="16" />浅色</button>
               <button :class="{ active: workspace.appearance.mode === 'dark' }" @click="workspace.appearance.mode = 'dark'"><Moon :size="16" />深色</button>
             </div>
           </div>
-          <div class="setting-section">
-            <div class="setting-title"><div><h3>主题色</h3><p>不会改变请求方法的语义颜色</p></div></div>
-            <div class="color-picker-row">
+          <div class="setting-section" :class="{ collapsed: collapsedSettings.accent }">
+            <div class="setting-title"><button class="setting-title-toggle" @click="collapsedSettings.accent = !collapsedSettings.accent"><ChevronRight v-if="collapsedSettings.accent" :size="16" /><ChevronDown v-else :size="16" /><div><h3>主题色</h3><p>不会改变请求方法的语义颜色</p></div></button></div>
+            <div v-if="!collapsedSettings.accent" class="color-picker-row">
               <button
                 v-for="color in themeColors"
                 :key="color"
@@ -1701,37 +1804,41 @@ onBeforeUnmount(() => {
               </label>
             </div>
           </div>
-          <div class="setting-section">
+          <div class="setting-section" :class="{ collapsed: collapsedSettings.mcp }">
             <div class="setting-title">
-              <div><h3>MCP 服务</h3><p>允许本机 AI 客户端管理分组、创建并调用接口</p></div>
-              <label class="switch"><input v-model="workspace.mcp.enabled" type="checkbox" :disabled="mcpRuntime.applying" @change="applyMcpConfig" /><span></span></label>
+              <button class="setting-title-toggle" @click="collapsedSettings.mcp = !collapsedSettings.mcp"><ChevronRight v-if="collapsedSettings.mcp" :size="16" /><ChevronDown v-else :size="16" /><div><h3>MCP 服务</h3><p>允许本机 AI 客户端管理分组、创建并调用接口</p></div></button>
+              <label class="switch" @click.stop><input v-model="workspace.mcp.enabled" type="checkbox" :disabled="mcpRuntime.applying" @change="applyMcpConfig" /><span></span></label>
             </div>
+            <template v-if="!collapsedSettings.mcp">
             <div class="mcp-status-row" :class="{ running: mcpRuntime.running, error: mcpRuntime.error }">
               <span class="mcp-status-dot"></span>
               <strong>{{ mcpRuntime.applying ? '正在应用' : mcpRuntime.running ? '运行中' : '已关闭' }}</strong>
               <code>http://0.0.0.0:{{ workspace.mcp.port }}/mcp</code>
+              <button class="mcp-address-trigger" :disabled="!workspace.mcp.enabled" :title="mcpAddressesOpen ? '收起地址' : '查看所有地址'" @click="toggleMcpAddresses"><Network :size="14" /><span>{{ mcpAddressesOpen ? '收起' : '地址' }}</span></button>
             </div>
-            <label class="field"><span>监听端口</span><input v-model.number="workspace.mcp.port" type="number" min="1024" max="65535" step="1" :disabled="mcpRuntime.applying" @change="workspace.mcp.enabled && applyMcpConfig()" /></label>
-            <button class="mcp-address-toggle" :disabled="!workspace.mcp.enabled" @click="toggleMcpAddresses"><Network :size="14" />{{ mcpAddressesOpen ? '收起地址' : '查看所有地址' }}</button>
             <div v-if="mcpAddressesOpen" class="mcp-address-list">
               <div v-for="address in mcpAddresses" :key="address" class="mcp-address-row">
                 <code>{{ address }}</code>
                 <button :title="copiedMcpAddress === address ? '已复制' : '复制地址'" @click="copyMcpAddress(address)"><Check v-if="copiedMcpAddress === address" :size="14" /><Copy v-else :size="14" /></button>
               </div>
             </div>
+            <label class="field"><span>监听端口</span><input v-model.number="workspace.mcp.port" type="number" min="1024" max="65535" step="1" :disabled="mcpRuntime.applying" @change="workspace.mcp.enabled && applyMcpConfig()" /></label>
             <div v-if="mcpRuntime.error" class="mcp-setting-error">{{ mcpRuntime.error }}</div>
+            </template>
           </div>
-          <div class="setting-section">
-            <div class="setting-title"><div><h3>网络代理</h3><p>HTTP 与 HTTPS 请求均通过此代理发送</p></div><label class="switch"><input v-model="workspace.proxy.enabled" type="checkbox" /><span></span></label></div>
+          <div class="setting-section" :class="{ collapsed: collapsedSettings.proxy }">
+            <div class="setting-title"><button class="setting-title-toggle" @click="collapsedSettings.proxy = !collapsedSettings.proxy"><ChevronRight v-if="collapsedSettings.proxy" :size="16" /><ChevronDown v-else :size="16" /><div><h3>网络代理</h3><p>HTTP 与 HTTPS 请求均通过此代理发送</p></div></button><label class="switch" @click.stop><input v-model="workspace.proxy.enabled" type="checkbox" /><span></span></label></div>
+            <template v-if="!collapsedSettings.proxy">
             <label class="field"><span>代理地址</span><input v-model="workspace.proxy.url" :disabled="!workspace.proxy.enabled" placeholder="http://127.0.0.1:7890" /></label>
             <div class="field-grid">
               <label class="field"><span>用户名</span><input v-model="workspace.proxy.username" :disabled="!workspace.proxy.enabled" autocomplete="off" /></label>
               <label class="field"><span>密码</span><input v-model="workspace.proxy.password" :disabled="!workspace.proxy.enabled" type="password" autocomplete="new-password" /></label>
             </div>
+            </template>
           </div>
-          <div class="setting-section variables-section">
-            <div class="setting-title"><div><h3>环境变量</h3><p>可直接添加全局变量，或创建命名空间后添加；支持 <code>token</code>、<code>dev.token</code>、<code>dev.wms.token</code>，最多三级</p></div></div>
-            <div class="variable-tree">
+          <div class="setting-section variables-section" :class="{ collapsed: collapsedSettings.variables }">
+            <div class="setting-title"><button class="setting-title-toggle" @click="collapsedSettings.variables = !collapsedSettings.variables"><ChevronRight v-if="collapsedSettings.variables" :size="16" /><ChevronDown v-else :size="16" /><div><h3>环境变量</h3><p>可直接添加全局变量，或创建命名空间后添加；支持 <code>token</code>、<code>dev.token</code>、<code>dev.wms.token</code>，最多三级</p></div></button></div>
+            <div v-if="!collapsedSettings.variables" class="variable-tree">
               <div class="namespace-row root"><span>全局</span><button class="row-action" title="添加全局变量" @click="addVariableAt()"><Plus :size="14" /></button></div>
               <div v-for="item in variableHierarchy.roots" :key="item.id" class="kv-row variable-row level-0">
                 <input v-model="item.enabled" type="checkbox" aria-label="启用" />

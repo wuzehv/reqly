@@ -42,7 +42,8 @@ Available tools:
 
 - `reqly_list_collections`: list collections and saved requests
 - `reqly_create_collection`: create a collection
-- `reqly_create_request`: create a request with Query parameters, headers, and JSON/Text/Form body
+- `reqly_create_subgroup`: create a second-level group that inherits its parent collection Pre-request script
+- `reqly_create_request`: create a request in a collection or subgroup with Query parameters, headers, and JSON/Text/Form body
 - `reqly_run_request`: run a saved request with optional workspace-variable overrides
 
 The MCP server is accessible on the local network and does not currently require authentication. Use a trusted network and restrict access with the system firewall. Browser origins other than localhost are rejected. Saved requests run through Reqly's normal execution pipeline, including workspace variables, Pre-request scripts, Post-response scripts, retries, and supported body types.

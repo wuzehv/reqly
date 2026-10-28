@@ -247,8 +247,20 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "reqly_create_subgroup",
+            "description": "Create a second-level group in a Reqly collection. Requests in the subgroup inherit the parent collection Pre-request script.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "collectionId": { "type": "string" },
+                    "name": { "type": "string", "minLength": 1 }
+                },
+                "required": ["collectionId", "name"], "additionalProperties": false
+            }
+        }),
+        json!({
             "name": "reqly_create_request",
-            "description": "Create an HTTP request in a Reqly collection.",
+            "description": "Create an HTTP request in a Reqly collection or second-level group.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -289,6 +301,7 @@ async fn call_tool(state: &McpState, params: Value) -> Result<Value, (i64, Strin
     let result = match name {
         "reqly_list_collections" => list_collections(&state.app),
         "reqly_create_collection" => create_collection(&state.app, &arguments),
+        "reqly_create_subgroup" => create_subgroup(&state.app, &arguments),
         "reqly_create_request" => create_request(&state.app, &arguments),
         "reqly_run_request" => state.manager.run_request(&state.app, &arguments).await,
         _ => return Err((-32602, format!("Unknown tool: {name}"))),
@@ -344,7 +357,26 @@ fn list_collections(app: &AppHandle) -> Result<Value, String> {
                     "url": request["url"], "archived": request["archived"], "pinned": request["pinned"]
                 }))
                 .collect::<Vec<_>>();
-            json!({ "id": collection["id"], "name": collection["name"], "requests": requests })
+            let groups = collection["groups"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|group| {
+                    let requests = group["requests"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|request| json!({
+                            "id": request["id"], "name": request["name"], "method": request["method"],
+                            "url": request["url"], "archived": request["archived"], "pinned": request["pinned"]
+                        }))
+                        .collect::<Vec<_>>();
+                    json!({ "id": group["id"], "name": group["name"], "requests": requests })
+                })
+                .collect::<Vec<_>>();
+            json!({ "id": collection["id"], "name": collection["name"], "requests": requests, "groups": groups })
         })
         .collect::<Vec<_>>();
     Ok(json!({ "collections": collections }))
@@ -355,7 +387,7 @@ fn create_collection(app: &AppHandle, arguments: &Value) -> Result<Value, String
     let mut workspace = load_workspace(app)?;
     let collection = json!({
         "id": Uuid::new_v4().to_string(), "name": name, "expanded": true,
-        "preScript": DEFAULT_PRE_SCRIPT, "requests": []
+        "preScript": DEFAULT_PRE_SCRIPT, "requests": [], "groups": []
     });
     workspace["collections"]
         .as_array_mut()
@@ -363,6 +395,33 @@ fn create_collection(app: &AppHandle, arguments: &Value) -> Result<Value, String
         .push(collection.clone());
     save_workspace(app, &workspace)?;
     Ok(json!({ "collection": collection }))
+}
+
+fn create_subgroup(app: &AppHandle, arguments: &Value) -> Result<Value, String> {
+    let collection_id = required_string(arguments, "collectionId")?;
+    let name = required_string(arguments, "name")?;
+    let mut workspace = load_workspace(app)?;
+    let collection = workspace["collections"]
+        .as_array_mut()
+        .and_then(|items| {
+            items
+                .iter_mut()
+                .find(|item| item["id"].as_str() == Some(collection_id.as_str()))
+        })
+        .ok_or_else(|| format!("Collection not found: {collection_id}"))?;
+    let subgroup = json!({
+        "id": Uuid::new_v4().to_string(), "name": name, "expanded": true,
+        "archiveExpanded": false, "requests": []
+    });
+    if !collection["groups"].is_array() {
+        collection["groups"] = json!([]);
+    }
+    collection["groups"]
+        .as_array_mut()
+        .unwrap()
+        .push(subgroup.clone());
+    save_workspace(app, &workspace)?;
+    Ok(json!({ "subgroup": subgroup, "inheritsPreScriptFrom": collection_id }))
 }
 
 fn create_request(app: &AppHandle, arguments: &Value) -> Result<Value, String> {
@@ -398,17 +457,27 @@ fn create_request(app: &AppHandle, arguments: &Value) -> Result<Value, String> {
         "pinned": false, "archived": false
     });
     let mut workspace = load_workspace(app)?;
-    let collection = workspace["collections"]
+    let collections = workspace["collections"]
         .as_array_mut()
-        .and_then(|items| {
-            items
+        .ok_or("Invalid workspace: collections must be an array")?;
+    let mut target = None;
+    for collection in collections {
+        if collection["id"].as_str() == Some(collection_id.as_str()) {
+            target = Some(collection);
+            break;
+        }
+        if let Some(group) = collection["groups"].as_array_mut().and_then(|groups| {
+            groups
                 .iter_mut()
-                .find(|item| item["id"].as_str() == Some(collection_id.as_str()))
-        })
-        .ok_or_else(|| format!("Collection not found: {collection_id}"))?;
-    collection["requests"]
+                .find(|group| group["id"].as_str() == Some(collection_id.as_str()))
+        }) {
+            target = Some(group);
+            break;
+        }
+    }
+    target.ok_or_else(|| format!("Collection or subgroup not found: {collection_id}"))?["requests"]
         .as_array_mut()
-        .ok_or("Invalid collection: requests must be an array")?
+        .ok_or("Invalid group: requests must be an array")?
         .push(request.clone());
     save_workspace(app, &workspace)?;
     Ok(json!({ "request": request }))
