@@ -1,6 +1,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, toRaw, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import ResponseViewer from "./components/ResponseViewer.vue";
 import ScriptEditor from "./components/ScriptEditor.vue";
 import {
@@ -9,15 +10,18 @@ import {
   ArchiveRestore,
   ArrowDown,
   ArrowUp,
+  Braces,
   Check,
   ChevronDown,
   ChevronRight,
   ClipboardPaste,
   Code2,
+  Copy,
   FileJson,
   Folder,
   FolderPlus,
   Moon,
+  Network,
   Pencil,
   Pin,
   Plus,
@@ -61,6 +65,7 @@ const defaultWorkspace = () => {
     selectedRequestId: request.id,
     variables: [pair("baseUrl", "https://httpbin.org")],
     proxy: { enabled: false, url: "http://127.0.0.1:7890", username: "", password: "" },
+    mcp: { enabled: true, port: 3765 },
     appearance: { mode: "light", accent: themeColors[0], sidebarWidth: 252, requestEditorHeight: 430, consoleHeight: 300, settingsWidth: 520 },
   };
 };
@@ -74,6 +79,10 @@ const responseFullscreen = ref(false);
 const sending = ref(false);
 const saveState = ref("saved");
 const settingsOpen = ref(false);
+const mcpRuntime = reactive({ running: false, port: null, applying: false, error: "" });
+const mcpAddresses = ref([]);
+const mcpAddressesOpen = ref(false);
+const copiedMcpAddress = ref("");
 const searchText = ref("");
 const errorMessage = ref("");
 const bodyFormatError = ref("");
@@ -118,6 +127,9 @@ const jsonValueEditors = reactive({});
 const noticeMessage = ref("");
 let saveTimer;
 let noticeTimer;
+let stopWorkspaceListener;
+let stopMcpRequestListener;
+let mcpRequestQueue = Promise.resolve();
 
 function appendConsole(entry) {
   scriptLogs.value.push({
@@ -533,6 +545,9 @@ function syncParamsFromUrl(request) {
 }
 
 function normalizeWorkspace(saved) {
+  saved.mcp ||= { enabled: true, port: 3765 };
+  saved.mcp.enabled ??= true;
+  saved.mcp.port ||= 3765;
   saved.appearance ||= { mode: "light", accent: themeColors[0] };
   saved.appearance.mode ||= "light";
   saved.appearance.sidebarWidth ||= 252;
@@ -559,6 +574,58 @@ function normalizeWorkspace(saved) {
     delete collection.postScript;
   });
   return saved;
+}
+
+async function applyMcpConfig() {
+  mcpRuntime.error = "";
+  mcpAddressesOpen.value = false;
+  const port = Number(workspace.mcp.port);
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+    mcpRuntime.error = "端口必须是 1024 到 65535 之间的整数";
+    return;
+  }
+  if (!isTauri()) {
+    mcpRuntime.error = "MCP 服务仅在桌面应用中可用";
+    return;
+  }
+  mcpRuntime.applying = true;
+  try {
+    const status = await invoke("configure_mcp", { enabled: workspace.mcp.enabled, port });
+    mcpRuntime.running = status.running;
+    mcpRuntime.port = status.port;
+  } catch (error) {
+    mcpRuntime.running = false;
+    workspace.mcp.enabled = false;
+    mcpRuntime.error = formatError(error);
+  } finally {
+    mcpRuntime.applying = false;
+  }
+}
+
+async function toggleMcpAddresses() {
+  if (mcpAddressesOpen.value) {
+    mcpAddressesOpen.value = false;
+    return;
+  }
+  mcpRuntime.error = "";
+  if (!isTauri()) {
+    mcpRuntime.error = "MCP 地址仅在桌面应用中可用";
+    return;
+  }
+  try {
+    mcpAddresses.value = await invoke("get_mcp_addresses", { port: Number(workspace.mcp.port) });
+    mcpAddressesOpen.value = true;
+  } catch (error) {
+    mcpRuntime.error = formatError(error);
+  }
+}
+
+async function copyMcpAddress(address) {
+  await navigator.clipboard.writeText(address);
+  copiedMcpAddress.value = address;
+  window.setTimeout(() => {
+    if (copiedMcpAddress.value === address) copiedMcpAddress.value = "";
+  }, 1200);
 }
 
 function resizeSidebar(event) {
@@ -857,10 +924,10 @@ function applyScriptVariables(variables) {
   workspace.variables = [...disabledVariables, ...variables];
 }
 
-async function buildInput(source, variables = cloneData(workspace.variables), persistVariables = true) {
+async function buildInput(source, variables = cloneData(workspace.variables), persistVariables = true, collection = selectedCollection.value) {
   const { runPreRequest } = await import("./services/postmanSandbox");
   const execution = await runPreRequest({
-    script: selectedCollection.value?.preScript || "",
+    script: collection?.preScript || "",
     request: cloneData(source),
     variables,
     onConsole: (entry) => appendConsole({ phase: "pre", ...entry }),
@@ -872,6 +939,34 @@ async function buildInput(source, variables = cloneData(workspace.variables), pe
     request: execution.request,
     variables: execution.variables,
   };
+}
+
+async function executeRequestLifecycle(source, collection, variables = cloneData(workspace.variables), persistVariables = true) {
+  let currentVariables = variables;
+  let result;
+  let retryCount = 0;
+  while (true) {
+    const execution = await buildInput(source, currentVariables, persistVariables, collection);
+    currentVariables = execution.variables;
+    appendConsole({ requestName: source.name, phase: "request", level: "info", args: [`${execution.input.method} ${execution.input.url}`] });
+    result = await executeHttp(execution.input);
+    appendConsole({
+      requestName: source.name,
+      phase: "response",
+      level: result.status >= 400 ? "error" : "info",
+      args: [`HTTP ${result.status} ${result.statusText}`, `${result.durationMs} ms`],
+    });
+    const postExecution = await runResponseScript(execution.request, result, currentVariables, persistVariables);
+    currentVariables = postExecution.variables;
+    if (!postExecution.retryRequested) break;
+    if (retryCount >= 1) {
+      appendConsole({ requestName: source.name, phase: "post", level: "warn", args: ["已达到自动重试上限（1 次）"] });
+      break;
+    }
+    retryCount += 1;
+    appendConsole({ requestName: source.name, phase: "post", level: "info", args: ["凭证已刷新，正在重新执行请求"] });
+  }
+  return result;
 }
 
 async function runResponseScript(request, result, variables = cloneData(workspace.variables), persistVariables = true) {
@@ -923,31 +1018,50 @@ async function sendRequest() {
   errorMessage.value = "";
   response.value = null;
   try {
-    let retryCount = 0;
-    while (true) {
-      const execution = await buildInput(selectedRequest.value);
-      appendConsole({ phase: "request", level: "info", args: [`${execution.input.method} ${execution.input.url}`] });
-      response.value = await executeHttp(execution.input);
-      appendConsole({
-        phase: "response",
-        level: response.value.status >= 400 ? "error" : "info",
-        args: [`HTTP ${response.value.status} ${response.value.statusText}`, `${response.value.durationMs} ms`],
-      });
-      const postExecution = await runResponseScript(execution.request, response.value);
-      if (!postExecution.retryRequested) break;
-      if (retryCount >= 1) {
-        appendConsole({ phase: "post", level: "warn", args: ["已达到自动重试上限（1 次）"] });
-        break;
-      }
-      retryCount += 1;
-      appendConsole({ phase: "post", level: "info", args: ["凭证已刷新，正在重新执行请求"] });
-    }
+    response.value = await executeRequestLifecycle(selectedRequest.value, selectedCollection.value);
   } catch (error) {
     errorMessage.value = formatError(error);
     appendConsole({ phase: "request", level: "error", args: [errorMessage.value] });
   } finally {
     sending.value = false;
   }
+}
+
+async function executeMcpRequest({ requestId, variables = {} }) {
+  let collection;
+  let request;
+  for (const candidate of workspace.collections) {
+    const matched = candidate.requests.find((item) => item.id === requestId);
+    if (matched) {
+      collection = candidate;
+      request = matched;
+      break;
+    }
+  }
+  if (!request) throw new Error(`未找到请求：${requestId}`);
+  const hasOverrides = variables && Object.keys(variables).length > 0;
+  const source = hasOverrides ? applyBatchOverrides(request, variables) : request;
+  const executionVariables = hasOverrides ? batchVariables(variables) : cloneData(workspace.variables);
+  const result = await executeRequestLifecycle(source, collection, executionVariables, !hasOverrides);
+  setRequestExecutionResult(requestId, result, "");
+  return { response: result, scriptsExecuted: true };
+}
+
+function setRequestExecutionResult(requestId, result, error) {
+  if (workspace.selectedRequestId === requestId) {
+    response.value = result;
+    errorMessage.value = error;
+    responseTab.value = "body";
+    return;
+  }
+  const session = requestSessions.get(requestId) || {};
+  requestSessions.set(requestId, {
+    ...session,
+    response: result,
+    errorMessage: error,
+    activeTab: session.activeTab || "params",
+    responseTab: "body",
+  });
 }
 
 function requestPlaceholders(request) {
@@ -1193,10 +1307,37 @@ function handleKeydown(event) {
 onMounted(async () => {
   window.addEventListener("keydown", handleKeydown);
   try {
+    if (isTauri()) {
+      stopWorkspaceListener = await listen("workspace-updated", (event) => {
+        const saved = event.payload;
+        if (!saved?.collections || !saved?.variables || !saved?.proxy) return;
+        Object.assign(workspace, normalizeWorkspace(cloneData(saved)));
+        showNotice("已同步 MCP 工作区变更");
+      });
+    }
     const saved = isTauri()
       ? await invoke("load_workspace")
       : JSON.parse(localStorage.getItem("reqly-workspace") || "null");
     if (saved?.collections && saved?.variables && saved?.proxy) Object.assign(workspace, normalizeWorkspace(saved));
+    else await persist();
+    if (isTauri()) {
+      const status = await invoke("get_mcp_status");
+      mcpRuntime.running = status.running;
+      mcpRuntime.port = status.port;
+      stopMcpRequestListener = await listen("mcp-run-request", (event) => {
+        mcpRequestQueue = mcpRequestQueue.catch(() => {}).then(async () => {
+          const { callId, requestId, variables } = event.payload;
+          try {
+            const result = await executeMcpRequest({ requestId, variables });
+            await invoke("complete_mcp_request", { callId, result, error: null });
+          } catch (error) {
+            const message = formatError(error);
+            setRequestExecutionResult(requestId, null, message);
+            await invoke("complete_mcp_request", { callId, result: null, error: message });
+          }
+        });
+      });
+    }
   } catch (error) {
     errorMessage.value = `读取工作区失败：${formatError(error)}`;
   }
@@ -1204,6 +1345,8 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  stopWorkspaceListener?.();
+  stopMcpRequestListener?.();
   window.removeEventListener("keydown", handleKeydown);
   stopSidebarResize();
   stopRequestResize();
@@ -1470,14 +1613,17 @@ onBeforeUnmount(() => {
             <div class="batch-section-heading">
               <div>
                 <strong>迭代数据</strong>
-                <span v-if="batchPlaceholders.length === 1">检测到 1 个占位符，可直接输入值数组，如 <code>[1, 2]</code></span>
-                <span v-else>检测到 {{ batchPlaceholders.length }} 个占位符，请输入包含全部参数的对象数组</span>
+                <span v-if="batchPlaceholders.length === 1">可直接输入值数组，如 <code>[1, 2]</code></span>
+                <span v-else>请输入包含全部参数的对象数组</span>
               </div>
               <div class="batch-heading-actions">
                 <span v-if="batchRunning" class="batch-progress">{{ batchProgress.current }} / {{ batchProgress.total }}</span>
               </div>
             </div>
-            <div class="batch-placeholder-list"><span>替换参数</span><code v-for="name in batchPlaceholders" :key="name">{{ name }}</code></div>
+            <div class="batch-placeholder-list">
+              <div class="batch-placeholder-label"><Braces :size="15" /><strong>替换参数</strong><span>{{ batchPlaceholders.length }}</span></div>
+              <div class="batch-placeholder-tags"><code v-for="name in batchPlaceholders" :key="name">{{ name }}</code></div>
+            </div>
             <div class="batch-editor">
               <ScriptEditor
                 :key="`batch-${selectedRequest.id}-${workspace.appearance.mode}`"
@@ -1554,6 +1700,26 @@ onBeforeUnmount(() => {
                 <span>自定义</span>
               </label>
             </div>
+          </div>
+          <div class="setting-section">
+            <div class="setting-title">
+              <div><h3>MCP 服务</h3><p>允许本机 AI 客户端管理分组、创建并调用接口</p></div>
+              <label class="switch"><input v-model="workspace.mcp.enabled" type="checkbox" :disabled="mcpRuntime.applying" @change="applyMcpConfig" /><span></span></label>
+            </div>
+            <div class="mcp-status-row" :class="{ running: mcpRuntime.running, error: mcpRuntime.error }">
+              <span class="mcp-status-dot"></span>
+              <strong>{{ mcpRuntime.applying ? '正在应用' : mcpRuntime.running ? '运行中' : '已关闭' }}</strong>
+              <code>http://0.0.0.0:{{ workspace.mcp.port }}/mcp</code>
+            </div>
+            <label class="field"><span>监听端口</span><input v-model.number="workspace.mcp.port" type="number" min="1024" max="65535" step="1" :disabled="mcpRuntime.applying" @change="workspace.mcp.enabled && applyMcpConfig()" /></label>
+            <button class="mcp-address-toggle" :disabled="!workspace.mcp.enabled" @click="toggleMcpAddresses"><Network :size="14" />{{ mcpAddressesOpen ? '收起地址' : '查看所有地址' }}</button>
+            <div v-if="mcpAddressesOpen" class="mcp-address-list">
+              <div v-for="address in mcpAddresses" :key="address" class="mcp-address-row">
+                <code>{{ address }}</code>
+                <button :title="copiedMcpAddress === address ? '已复制' : '复制地址'" @click="copyMcpAddress(address)"><Check v-if="copiedMcpAddress === address" :size="14" /><Copy v-else :size="14" /></button>
+              </div>
+            </div>
+            <div v-if="mcpRuntime.error" class="mcp-setting-error">{{ mcpRuntime.error }}</div>
           </div>
           <div class="setting-section">
             <div class="setting-title"><div><h3>网络代理</h3><p>HTTP 与 HTTPS 请求均通过此代理发送</p></div><label class="switch"><input v-model="workspace.proxy.enabled" type="checkbox" /><span></span></label></div>

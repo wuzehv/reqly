@@ -1,39 +1,41 @@
 use reqwest::{Method, Proxy, header::HeaderMap};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{error::Error, fs, path::PathBuf, time::Instant};
-use tauri::{AppHandle, Manager};
+use std::{collections::BTreeSet, error::Error, fs, net::IpAddr, path::PathBuf, time::Instant};
+use tauri::{AppHandle, Manager, State};
+
+mod mcp;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct KeyValue {
-    key: String,
-    value: String,
-    enabled: bool,
+pub(crate) struct KeyValue {
+    pub(crate) key: String,
+    pub(crate) value: String,
+    pub(crate) enabled: bool,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ProxyConfig {
-    enabled: bool,
-    url: String,
-    username: String,
-    password: String,
+pub(crate) struct ProxyConfig {
+    pub(crate) enabled: bool,
+    pub(crate) url: String,
+    pub(crate) username: String,
+    pub(crate) password: String,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct RequestInput {
-    method: String,
-    url: String,
-    headers: Vec<KeyValue>,
-    body: String,
-    proxy: ProxyConfig,
+pub(crate) struct RequestInput {
+    pub(crate) method: String,
+    pub(crate) url: String,
+    pub(crate) headers: Vec<KeyValue>,
+    pub(crate) body: String,
+    pub(crate) proxy: ProxyConfig,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ResponseOutput {
+pub(crate) struct ResponseOutput {
     status: u16,
     status_text: String,
     duration_ms: u128,
@@ -42,7 +44,7 @@ struct ResponseOutput {
     body: String,
 }
 
-fn state_path(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn state_path(app: &AppHandle) -> Result<PathBuf, String> {
     let directory = app
         .path()
         .app_data_dir()
@@ -86,7 +88,46 @@ fn save_workspace(app: AppHandle, workspace: Value) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn send_request(input: RequestInput) -> Result<ResponseOutput, String> {
+async fn configure_mcp(
+    app: AppHandle,
+    manager: State<'_, mcp::McpManager>,
+    enabled: bool,
+    port: u16,
+) -> Result<mcp::McpStatus, String> {
+    manager.configure(app, enabled, port).await
+}
+
+#[tauri::command]
+async fn get_mcp_status(manager: State<'_, mcp::McpManager>) -> Result<mcp::McpStatus, String> {
+    Ok(manager.status().await)
+}
+
+#[tauri::command]
+async fn complete_mcp_request(
+    manager: State<'_, mcp::McpManager>,
+    call_id: String,
+    result: Option<Value>,
+    error: Option<String>,
+) -> Result<(), String> {
+    manager.complete_request(call_id, result, error).await
+}
+
+#[tauri::command]
+fn get_mcp_addresses(port: u16) -> Result<Vec<String>, String> {
+    let mut addresses = BTreeSet::new();
+    for interface in if_addrs::get_if_addrs().map_err(|error| error.to_string())? {
+        let ip = interface.ip();
+        if ip.is_unspecified() {
+            continue;
+        }
+        if let IpAddr::V4(address) = ip {
+            addresses.insert(format!("http://{address}:{port}/mcp"));
+        }
+    }
+    Ok(addresses.into_iter().collect())
+}
+
+pub(crate) async fn execute_request(input: RequestInput) -> Result<ResponseOutput, String> {
     let mut client = reqwest::Client::builder();
     if input.proxy.enabled {
         if input.proxy.url.trim().is_empty() {
@@ -152,13 +193,52 @@ async fn send_request(input: RequestInput) -> Result<ResponseOutput, String> {
     })
 }
 
+#[tauri::command]
+async fn send_request(input: RequestInput) -> Result<ResponseOutput, String> {
+    execute_request(input).await
+}
+
+#[cfg(feature = "desktop")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(mcp::McpManager::default())
+        .setup(|app| {
+            let app_handle = app.handle().clone();
+            let manager = app.state::<mcp::McpManager>().inner().clone();
+            let (enabled, port) = state_path(&app_handle)
+                .ok()
+                .and_then(|path| fs::read_to_string(path).ok())
+                .and_then(|content| serde_json::from_str::<Value>(&content).ok())
+                .map(|workspace| {
+                    (
+                        workspace
+                            .pointer("/mcp/enabled")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(true),
+                        workspace
+                            .pointer("/mcp/port")
+                            .and_then(Value::as_u64)
+                            .and_then(|value| u16::try_from(value).ok())
+                            .unwrap_or(3765),
+                    )
+                })
+                .unwrap_or((true, 3765));
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = manager.configure(app_handle, enabled, port).await {
+                    eprintln!("Reqly MCP server failed: {error}");
+                }
+            });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             load_workspace,
             save_workspace,
-            send_request
+            send_request,
+            configure_mcp,
+            get_mcp_status,
+            complete_mcp_request,
+            get_mcp_addresses
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
