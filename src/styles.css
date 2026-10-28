@@ -213,6 +213,8 @@ input[type="checkbox"] { width: 13px; height: 13px; margin: 0 0 0 5px; accent-co
 .format-button.danger-button:hover { border-color: var(--red); color: var(--red); background: color-mix(in srgb, var(--red) 8%, #f3f5f5); }
 .body-format-error { flex: 0 0 auto; margin-top: 7px; color: var(--red); font-size: 11px; }
 .form-importer { flex: 0 0 auto; margin-bottom: 10px; padding: 10px 0; border-top: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft); }
+.form-import-heading { height: 27px; display: flex; align-items: flex-start; justify-content: space-between; color: #5d6972; font-size: 12px; font-weight: 600; }
+.form-import-heading .icon-button { margin-top: -5px; }
 .body-editor .form-importer textarea { width: 100%; height: 88px; min-height: 88px; display: block; resize: vertical; border: 1px solid #c5ced3; border-radius: 4px; padding: 8px 10px; color: #33414a; background: #f3f5f5; font: 12px/1.5 var(--font-mono); }
 .form-import-options { display: flex; align-items: center; gap: 9px; margin-top: 8px; }
 .compact-segmented { height: 28px; }
@@ -632,6 +634,7 @@ input[type="checkbox"] { width: 13px; height: 13px; margin: 0 0 0 5px; accent-co
 .theme-dark .body-editor > textarea:focus,
 .theme-dark .script-editor textarea:focus { border-color: #626a73; }
 .theme-dark .body-editor .form-importer textarea { border-color: #454b52; color: #d9dcdf; background: #191b1e; }
+.theme-dark .form-import-heading { color: #b3bac0; }
 .theme-dark .format-button { border-color: #4b5259; color: #b8bec4; background: #292d31; }
 .theme-dark .format-button:hover { border-color: #69727b; color: #eef0f1; background: #34393e; }
 .theme-dark .empty-editor,

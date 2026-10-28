@@ -470,7 +470,9 @@ function changeSelectedRequest(id) {
 }
 
 function addRow(rows) {
-  rows.push(pair());
+  const item = pair();
+  rows.push(item);
+  nextTick(() => document.querySelector(`[data-row-key="${item.id}"]`)?.focus());
 }
 
 function isStructuredJson(value) {
@@ -1748,7 +1750,7 @@ onBeforeUnmount(() => {
               <div class="kv-head"><span></span><span>KEY</span><span>VALUE</span><span></span></div>
               <div v-for="(item, index) in activeTab === 'params' ? selectedRequest.params : selectedRequest.headers" :key="item.id" class="kv-row">
                 <input v-model="item.enabled" type="checkbox" aria-label="启用" @change="activeTab === 'params' && syncUrlFromParams(selectedRequest)" />
-                <input v-model="item.key" placeholder="键" @input="activeTab === 'params' && syncUrlFromParams(selectedRequest)" />
+                <input v-model="item.key" :data-row-key="item.id" placeholder="键" @input="activeTab === 'params' && syncUrlFromParams(selectedRequest)" />
                 <div v-if="activeTab === 'params'" class="kv-value-editor" :class="{ json: usesJsonEditor(item) }">
                   <div v-if="usesJsonEditor(item)" class="kv-json-editor">
                     <ScriptEditor
@@ -1778,6 +1780,7 @@ onBeforeUnmount(() => {
                 </div>
               </div>
               <div v-if="formImportOpen && (selectedRequest.bodyType === 'form' || selectedRequest.bodyType === 'formdata')" class="form-importer">
+                <div class="form-import-heading"><span>批量导入参数</span><button class="icon-button small" title="关闭导入框" @click="formImportOpen = false; formImportError = ''"><X :size="15" /></button></div>
                 <textarea v-model="formImportText" spellcheck="false" placeholder="粘贴 a=1&b=2、逐行 key=value，或 JSON 对象"></textarea>
                 <div class="form-import-options">
                   <div class="segmented compact-segmented">
@@ -1795,7 +1798,7 @@ onBeforeUnmount(() => {
                 <div class="kv-head"><span></span><span>KEY</span><span>VALUE</span><span></span></div>
                 <div v-for="(item, index) in selectedRequest.bodyType === 'form' ? selectedRequest.formBody : selectedRequest.formData" :key="item.id" class="kv-row">
                   <input v-model="item.enabled" type="checkbox" aria-label="启用" />
-                  <input v-model="item.key" placeholder="字段名" />
+                  <input v-model="item.key" :data-row-key="item.id" placeholder="字段名" />
                   <div class="kv-value-editor" :class="{ json: usesJsonEditor(item) }">
                     <div v-if="usesJsonEditor(item)" class="kv-json-editor">
                       <ScriptEditor
