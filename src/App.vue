@@ -10,7 +10,6 @@ import {
   ArchiveRestore,
   ArrowDown,
   ArrowUp,
-  Braces,
   Check,
   ChevronDown,
   ChevronRight,
@@ -1699,7 +1698,7 @@ onBeforeUnmount(() => {
 
         <div class="request-resizer" title="拖动调整请求与响应区域高度" @pointerdown="startRequestResize" @dblclick="workspace.appearance.requestEditorHeight = 430"></div>
 
-        <ResponseViewer v-model:tab="responseTab" v-model:fullscreen="responseFullscreen" :response="response" :error-message="errorMessage" />
+        <ResponseViewer v-model:tab="responseTab" v-model:fullscreen="responseFullscreen" :response="response" :error-message="errorMessage" :theme="workspace.appearance.mode" />
       </main>
 
       <main v-else class="no-selection"><div class="empty-logo">R</div><strong>还没有请求</strong><span>从左侧新建一个集合或请求</span><button class="send-button" @click="addRequest()"><Plus :size="17" />新建请求</button></main>
@@ -1716,15 +1715,15 @@ onBeforeUnmount(() => {
             <div class="batch-section-heading">
               <div>
                 <strong>迭代数据</strong>
-                <span v-if="batchPlaceholders.length === 1">可直接输入值数组，如 <code>[1, 2]</code></span>
-                <span v-else>请输入包含全部参数的对象数组</span>
+                <span v-if="batchPlaceholders.length === 1">请求模板使用 <code v-pre>{{参数名}}</code><br />单参数可直接输入值数组，如 <code>[1, 2]</code></span>
+                <span v-else>请求模板使用 <code v-pre>{{参数名}}</code><br />多参数请输入包含全部参数的对象数组</span>
               </div>
               <div class="batch-heading-actions">
                 <span v-if="batchRunning" class="batch-progress">{{ batchProgress.current }} / {{ batchProgress.total }}</span>
               </div>
             </div>
             <div class="batch-placeholder-list">
-              <div class="batch-placeholder-label"><Braces :size="15" /><strong>替换参数</strong><span>{{ batchPlaceholders.length }}</span></div>
+              <div class="batch-placeholder-label"><strong>替换参数</strong><span>{{ batchPlaceholders.length }}</span></div>
               <div class="batch-placeholder-tags"><code v-for="name in batchPlaceholders" :key="name">{{ name }}</code></div>
             </div>
             <div class="batch-editor">
@@ -1761,6 +1760,7 @@ onBeforeUnmount(() => {
               class="batch-response-viewer"
               :response="selectedBatchResult.response"
               :error-message="selectedBatchResult.error"
+              :theme="workspace.appearance.mode"
               empty-text="当前批次请求执行完成后，结果会显示在这里"
             />
           </section>

@@ -11,6 +11,7 @@ import {
   Maximize2,
   Minimize2,
 } from "@lucide/vue";
+import ResponseCodeViewer from "./ResponseCodeViewer.vue";
 
 const props = defineProps({
   response: { type: Object, default: null },
@@ -18,6 +19,7 @@ const props = defineProps({
   tab: { type: String, default: "body" },
   fullscreen: { type: Boolean, default: false },
   emptyText: { type: String, default: "发送请求后，结果会显示在这里" },
+  theme: { type: String, default: "light" },
 });
 const emit = defineEmits(["update:tab", "update:fullscreen"]);
 const copied = ref(false);
@@ -48,6 +50,29 @@ const parsedResponseJson = computed(() => {
     return { valid: false, value: null };
   }
 });
+const responseContentType = computed(() => {
+  const header = props.response?.headers?.find(([key]) => key.toLowerCase() === "content-type");
+  return String(header?.[1] || "").toLowerCase();
+});
+const responseFormat = computed(() => {
+  if (!props.response) return "text";
+  const contentType = responseContentType.value;
+  const body = typeof props.response.body === "string" ? props.response.body.trimStart() : "";
+  if (contentType.includes("html") || /^<!doctype\s+html|^<html[\s>]/i.test(body)) return "html";
+  if (contentType.includes("xml") || /^<\?xml[\s>]/i.test(body) || /^<[A-Za-z_][\w:.-]*(?:\s|>)/.test(body)) return "xml";
+  if (contentType.includes("javascript") || contentType.includes("ecmascript")) return "javascript";
+  if (contentType.includes("css")) return "css";
+  if (contentType.includes("json") || parsedResponseJson.value.valid) return "json";
+  return "text";
+});
+const responseFormatLabel = computed(() => ({
+  json: "JSON",
+  html: "HTML",
+  xml: "XML",
+  javascript: "JavaScript",
+  css: "CSS",
+  text: "Text",
+}[responseFormat.value]));
 const jsonHasContainers = computed(() =>
   parsedResponseJson.value.valid
     && parsedResponseJson.value.value !== null
@@ -103,10 +128,6 @@ function setAllJsonCollapsed(collapsed) {
   visit(parsedResponseJson.value.value, "$");
 }
 
-function escapeHtml(value) {
-  return String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
-}
-
 function stringifyObject(value, spacing = 0) {
   const visited = new WeakSet();
   const result = JSON.stringify(value, (_key, item) => {
@@ -119,29 +140,6 @@ function stringifyObject(value, spacing = 0) {
     return item;
   }, spacing);
   return result === undefined ? String(value) : result;
-}
-
-function highlightBody(body) {
-  let content;
-  if (typeof body !== "string") content = stringifyObject(body, 2);
-  else {
-    try {
-      content = JSON.stringify(JSON.parse(body), null, 2);
-    } catch {
-      return escapeHtml(body);
-    }
-  }
-  const tokenPattern = /("(?:\\.|[^"\\])*")(?=\s*:)|("(?:\\.|[^"\\])*")|\b(true|false)\b|\bnull\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
-  let html = "";
-  let offset = 0;
-  for (const match of content.matchAll(tokenPattern)) {
-    html += escapeHtml(content.slice(offset, match.index));
-    const token = match[0];
-    const type = match[1] ? "key" : match[2] ? "string" : token === "true" || token === "false" ? "boolean" : token === "null" ? "null" : "number";
-    html += `<span class="json-${type}">${escapeHtml(token)}</span>`;
-    offset = match.index + token.length;
-  }
-  return html + escapeHtml(content.slice(offset));
 }
 
 function formatBytes(bytes) {
@@ -174,7 +172,8 @@ watch(
         <button :class="{ active: activeTab === 'headers' }" @click="activeTab = 'headers'">响应头 <span v-if="response" class="tab-count">{{ response.headers.length }}</span></button>
       </nav>
       <div v-if="response" class="response-meta">
-        <button v-if="activeTab === 'body' && jsonHasContainers" class="json-view-command" :title="jsonRootCollapsed ? '全部展开' : '全部折叠'" @click="setAllJsonCollapsed(!jsonRootCollapsed)"><ChevronDown v-if="jsonRootCollapsed" :size="13" /><ChevronRight v-else :size="13" />{{ jsonRootCollapsed ? '展开' : '折叠' }}</button>
+        <button v-if="activeTab === 'body' && responseFormat === 'json' && jsonHasContainers" class="json-view-command" :title="jsonRootCollapsed ? '全部展开' : '全部折叠'" @click="setAllJsonCollapsed(!jsonRootCollapsed)"><ChevronDown v-if="jsonRootCollapsed" :size="13" /><ChevronRight v-else :size="13" />{{ jsonRootCollapsed ? '展开' : '折叠' }}</button>
+        <span v-if="activeTab === 'body'" class="response-format">{{ responseFormatLabel }}</span>
         <span :class="statusClass">{{ response.status }} {{ response.statusText }}</span>
         <span><Clock3 :size="13" />{{ response.durationMs }} ms</span>
         <span><Gauge :size="13" />{{ formatBytes(response.size) }}</span>
@@ -184,7 +183,7 @@ watch(
     </div>
     <div v-if="errorMessage" class="error-state"><strong>请求失败</strong><span>{{ errorMessage }}</span></div>
     <template v-else-if="response">
-      <div v-if="activeTab === 'body' && parsedResponseJson.valid" class="response-json-tree">
+      <div v-if="activeTab === 'body' && responseFormat === 'json' && parsedResponseJson.valid" class="response-json-tree">
         <div v-for="row in jsonRows" :key="row.id" class="json-tree-row" :style="{ paddingLeft: `${12 + row.depth * 18}px` }">
           <template v-if="row.kind === 'open'">
             <button class="json-toggle" :title="row.collapsed ? '展开' : '折叠'" @click="toggleJsonPath(row.path)"><ChevronRight v-if="row.collapsed" :size="14" /><ChevronDown v-else :size="14" /></button>
@@ -195,7 +194,7 @@ watch(
           <template v-else><span class="json-close-spacer"></span><span v-if="row.key !== null" class="json-key">{{ JSON.stringify(row.key) }}: </span><span :class="jsonValueClass(row.value)">{{ jsonValueText(row.value) }}</span><span>{{ row.last ? '' : ',' }}</span></template>
         </div>
       </div>
-      <pre v-else-if="activeTab === 'body'" class="response-body" v-html="highlightBody(response.body)"></pre>
+      <ResponseCodeViewer v-else-if="activeTab === 'body'" :key="`${responseFormat}-${theme}`" :content="response.body" :language="responseFormat" :theme="theme" />
       <div v-else class="response-headers"><div v-for="([key, value], index) in response.headers" :key="`${key}-${index}`"><strong>{{ key }}</strong><span>{{ value }}</span></div></div>
     </template>
     <div v-else class="response-empty"><Braces :size="30" /><strong>等待响应</strong><span>{{ emptyText }}</span></div>
