@@ -127,6 +127,11 @@ fn get_mcp_addresses(port: u16) -> Result<Vec<String>, String> {
     Ok(addresses.into_iter().collect())
 }
 
+#[tauri::command]
+fn write_export_file(path: String, content: String) -> Result<(), String> {
+    fs::write(path, content).map_err(|error| error.to_string())
+}
+
 pub(crate) async fn execute_request(input: RequestInput) -> Result<ResponseOutput, String> {
     let mut client = reqwest::Client::builder();
     if input.proxy.enabled {
@@ -202,6 +207,7 @@ async fn send_request(input: RequestInput) -> Result<ResponseOutput, String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(mcp::McpManager::default())
         .setup(|app| {
             let app_handle = app.handle().clone();
@@ -238,7 +244,8 @@ pub fn run() {
             configure_mcp,
             get_mcp_status,
             complete_mcp_request,
-            get_mcp_addresses
+            get_mcp_addresses,
+            write_export_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

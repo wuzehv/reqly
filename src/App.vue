@@ -16,7 +16,9 @@ import {
   ClipboardPaste,
   Code2,
   Copy,
+  Download,
   FileJson,
+  FileInput,
   Folder,
   FolderPlus,
   Moon,
@@ -82,6 +84,8 @@ const mcpRuntime = reactive({ running: false, port: null, applying: false, error
 const mcpAddresses = ref([]);
 const mcpAddressesOpen = ref(false);
 const copiedMcpAddress = ref("");
+const artifactImportInput = ref(null);
+const importingArtifact = ref(false);
 const searchText = ref("");
 const errorMessage = ref("");
 const bodyFormatError = ref("");
@@ -678,6 +682,137 @@ async function copyMcpAddress(address) {
   window.setTimeout(() => {
     if (copiedMcpAddress.value === address) copiedMcpAddress.value = "";
   }, 1200);
+}
+
+async function downloadArtifact(format, data, name) {
+  const payload = { format, version: 1, exportedAt: new Date().toISOString(), data: cloneData(data) };
+  const content = JSON.stringify(payload, null, 2);
+  const filename = `${name.replace(/[\\/:*?"<>|]/g, "-")}.reqly.json`;
+  if (isTauri()) {
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const path = await save({
+      defaultPath: filename,
+      filters: [{ name: "Reqly JSON", extensions: ["json"] }],
+    });
+    if (!path) {
+      showNotice("已取消导出");
+      return;
+    }
+    await invoke("write_export_file", { path, content });
+    showNotice(`导出成功：${path}`);
+    return;
+  }
+  const url = URL.createObjectURL(new Blob([content], { type: "application/json" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  showNotice(`已导出：${filename}`);
+}
+
+async function exportCollection(collection) {
+  const source = workspace.collections.find((item) => item.id === collection.id) || collection;
+  try {
+    await downloadArtifact("reqly-collection", source, source.name);
+  } catch (error) {
+    showNotice(`导出失败：${formatError(error)}`);
+  }
+}
+
+async function exportSubgroup(group) {
+  const source = resolveRequestGroup(group);
+  try {
+    await downloadArtifact("reqly-subgroup", source, source.name);
+  } catch (error) {
+    showNotice(`导出失败：${formatError(error)}`);
+  }
+}
+
+function openArtifactImport() {
+  artifactImportInput.value?.click();
+}
+
+function cloneImportedRequest(source) {
+  if (!source || typeof source !== "object" || typeof source.name !== "string") throw new Error("接口数据格式无效");
+  const request = { ...makeRequest(source.name, source.url || ""), ...cloneData(source), id: uid() };
+  for (const field of ["params", "headers", "formBody", "formData"]) {
+    request[field] = (request[field] || []).map((item) => ({ ...item, id: uid() }));
+    if (!request[field].length) request[field].push(pair());
+  }
+  return request;
+}
+
+function cloneImportedSubgroup(source) {
+  if (!source || typeof source.name !== "string" || !Array.isArray(source.requests || [])) throw new Error("二级分组数据格式无效");
+  return {
+    ...cloneData(source),
+    id: uid(),
+    name: `${source.name} 副本`,
+    expanded: true,
+    archiveExpanded: false,
+    requests: (source.requests || []).map(cloneImportedRequest),
+  };
+}
+
+function cloneImportedCollection(source) {
+  if (!source || typeof source.name !== "string" || !Array.isArray(source.requests || [])) throw new Error("分组数据格式无效");
+  return {
+    ...cloneData(source),
+    id: uid(),
+    name: `${source.name} 副本`,
+    expanded: true,
+    archiveExpanded: false,
+    preScript: source.preScript || defaultPreScript,
+    requests: (source.requests || []).map(cloneImportedRequest),
+    groups: (source.groups || []).map(cloneImportedSubgroup),
+  };
+}
+
+function parentCollectionForGroup(group) {
+  return workspace.collections.find((collection) => collection.id === group?.id || (collection.groups || []).some((item) => item.id === group?.id));
+}
+
+async function importArtifactFile(event) {
+  const [file] = event.target.files || [];
+  event.target.value = "";
+  if (!file || importingArtifact.value) return;
+  importingArtifact.value = true;
+  try {
+    const payload = JSON.parse(await file.text());
+    const targetGroup = selectedRequestGroup.value;
+    if (payload?.format === "reqly-request") {
+      let target = targetGroup || workspace.collections[0];
+      if (!target) {
+        target = { id: uid(), name: "我的接口", expanded: true, preScript: defaultPreScript, requests: [], groups: [] };
+        workspace.collections.push(target);
+      }
+      const request = cloneImportedRequest(payload.data);
+      request.name = `${request.name} 副本`;
+      target.requests.push(request);
+      target.expanded = true;
+      changeSelectedRequest(request.id);
+    } else if (payload?.format === "reqly-subgroup") {
+      const parent = parentCollectionForGroup(targetGroup) || selectedCollection.value || workspace.collections[0];
+      if (!parent) throw new Error("请先创建一个一级分组");
+      parent.groups ||= [];
+      parent.groups.push(cloneImportedSubgroup(payload.data));
+      parent.expanded = true;
+    } else if (payload?.format === "reqly-collection") {
+      const collection = cloneImportedCollection(payload.data);
+      workspace.collections.push(collection);
+      workspace.selectedRequestId = collectionRequests(collection).find((request) => !request.archived)?.id || "";
+    } else {
+      throw new Error("不支持的文件类型，请选择 Reqly 分组或接口导出文件");
+    }
+    showNotice("导入成功，已创建新副本");
+  } catch (error) {
+    showNotice(`导入失败：${formatError(error)}`);
+  } finally {
+    importingArtifact.value = false;
+  }
 }
 
 function resizeSidebar(event) {
@@ -1424,6 +1559,7 @@ onBeforeUnmount(() => {
           <div><span class="eyebrow">WORKSPACE</span><strong>接口集合</strong></div>
           <button class="icon-button" title="新建集合" @click="addCollection"><FolderPlus :size="17" /></button>
         </div>
+        <input ref="artifactImportInput" class="artifact-import-input" type="file" accept="application/json,.json" @change="importArtifactFile" />
         <label class="search-box"><Search :size="15" /><input v-model="searchText" placeholder="搜索请求" /></label>
         <div class="collection-list">
           <section v-for="collection in filteredCollections" :key="collection.id" class="collection" :class="{ 'has-selected-request': collectionRequests(collection).some((request) => request.id === workspace.selectedRequestId) }">
@@ -1446,6 +1582,7 @@ onBeforeUnmount(() => {
               <button class="row-action" title="集合脚本" @click="openCollectionScript(collection)"><Code2 :size="14" /></button>
               <button class="row-action" title="添加二级分组" @click="addSubgroup(collection)"><FolderPlus :size="14" /></button>
               <button class="row-action" title="添加请求" @click="addRequest(collection)"><Plus :size="15" /></button>
+              <button class="row-action" title="导出分组" @click="exportCollection(collection)"><Download :size="13" /></button>
               <button class="row-action danger" title="删除集合" @click="removeCollection(collection)"><Trash2 :size="14" /></button>
             </div>
             <div v-if="collection.expanded" class="request-list">
@@ -1508,6 +1645,7 @@ onBeforeUnmount(() => {
                   <span class="count">{{ activeRequests(group).length }}</span>
                   <button class="row-action" title="重命名分组" @click="beginRenameCollection(group)"><Pencil :size="12" /></button>
                   <button class="row-action" title="添加请求" @click="addRequest(group)"><Plus :size="14" /></button>
+                  <button class="row-action" title="导出二级分组" @click="exportSubgroup(group)"><Download :size="13" /></button>
                   <button class="row-action danger" title="删除二级分组" @click="removeSubgroup(collection, group)"><Trash2 :size="13" /></button>
                 </div>
                 <div v-if="group.expanded" class="subrequest-list">
@@ -1550,7 +1688,10 @@ onBeforeUnmount(() => {
             </div>
           </section>
         </div>
-        <button class="new-request-button" @click="addRequest()"><Plus :size="16" />新建请求</button>
+        <div class="sidebar-footer-actions">
+          <button class="import-artifact-button" :disabled="importingArtifact" @click="openArtifactImport"><FileInput :size="16" />{{ importingArtifact ? '导入中' : '导入' }}</button>
+          <button class="new-request-button" @click="addRequest()"><Plus :size="16" />新建请求</button>
+        </div>
       </aside>
 
       <div class="sidebar-resizer" title="拖动调整集合栏宽度，双击恢复" @pointerdown="startSidebarResize" @dblclick="workspace.appearance.sidebarWidth = 252"></div>
