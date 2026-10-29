@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use axum::{
     Json, Router,
@@ -12,7 +12,7 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::{Mutex, oneshot};
 use uuid::Uuid;
 
-use crate::state_path;
+use crate::storage;
 
 const DEFAULT_PRE_SCRIPT: &str =
     "// 发送集合内的请求前运行\n// pm.environment.set(\"token\", \"your-token\");";
@@ -321,26 +321,21 @@ fn tool_result(value: Value, is_error: bool) -> Value {
 }
 
 fn load_workspace(app: &AppHandle) -> Result<Value, String> {
-    let path = state_path(app)?;
-    if !path.exists() {
-        return Err("Reqly workspace has not been saved yet; open Reqly once first".into());
-    }
-    let content = fs::read_to_string(path).map_err(|error| error.to_string())?;
-    serde_json::from_str(&content).map_err(|error| error.to_string())
+    storage::load_workspace_index(app)?
+        .ok_or_else(|| "Reqly workspace has not been saved yet; open Reqly once first".into())
 }
 
 fn save_workspace(app: &AppHandle, workspace: &Value) -> Result<(), String> {
-    let path = state_path(app)?;
-    let temporary = path.with_extension(format!("{}.tmp", Uuid::new_v4()));
-    let content = serde_json::to_vec_pretty(workspace).map_err(|error| error.to_string())?;
-    fs::write(&temporary, content).map_err(|error| error.to_string())?;
-    fs::rename(&temporary, &path).map_err(|error| error.to_string())?;
-    app.emit("workspace-updated", workspace.clone())
+    storage::save_workspace(app, workspace)?;
+    let index = storage::load_workspace_index(app)?.ok_or("workspace index was not saved")?;
+    app.emit("workspace-updated", index)
         .map_err(|error| error.to_string())
 }
 
 fn list_collections(app: &AppHandle) -> Result<Value, String> {
-    let workspace = load_workspace(app)?;
+    let workspace = storage::load_workspace_with_summaries(app)?.ok_or_else(|| {
+        "Reqly workspace has not been saved yet; open Reqly once first".to_string()
+    })?;
     let collections = workspace["collections"]
         .as_array()
         .cloned()
@@ -387,7 +382,8 @@ fn create_collection(app: &AppHandle, arguments: &Value) -> Result<Value, String
     let mut workspace = load_workspace(app)?;
     let collection = json!({
         "id": Uuid::new_v4().to_string(), "name": name, "expanded": true,
-        "preScript": DEFAULT_PRE_SCRIPT, "requests": [], "groups": []
+        "preScript": DEFAULT_PRE_SCRIPT, "requests": [], "requestCount": 0,
+        "requestsLoaded": true, "groups": []
     });
     workspace["collections"]
         .as_array_mut()
@@ -411,7 +407,7 @@ fn create_subgroup(app: &AppHandle, arguments: &Value) -> Result<Value, String> 
         .ok_or_else(|| format!("Collection not found: {collection_id}"))?;
     let subgroup = json!({
         "id": Uuid::new_v4().to_string(), "name": name, "expanded": true,
-        "archiveExpanded": false, "requests": []
+        "archiveExpanded": false, "requests": [], "requestCount": 0, "requestsLoaded": true
     });
     if !collection["groups"].is_array() {
         collection["groups"] = json!([]);
@@ -475,7 +471,11 @@ fn create_request(app: &AppHandle, arguments: &Value) -> Result<Value, String> {
             break;
         }
     }
-    target.ok_or_else(|| format!("Collection or subgroup not found: {collection_id}"))?["requests"]
+    let target =
+        target.ok_or_else(|| format!("Collection or subgroup not found: {collection_id}"))?;
+    target["requests"] = Value::Array(storage::load_container_requests(app, &collection_id)?);
+    target["requestsLoaded"] = Value::Bool(true);
+    target["requests"]
         .as_array_mut()
         .ok_or("Invalid group: requests must be an array")?
         .push(request.clone());

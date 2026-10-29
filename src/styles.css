@@ -33,6 +33,12 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .brand-mark { width: 23px; height: 23px; border-radius: 5px; font-size: 15px; }
 .topbar-actions { display: flex; align-items: center; gap: 8px; }
 .app-notice { position: fixed; top: 60px; left: 50%; z-index: 80; min-height: 38px; display: flex; align-items: center; gap: 8px; transform: translateX(-50%); border: 1px solid #d5aa63; border-radius: 5px; padding: 0 13px; color: #73501a; background: #fff5df; box-shadow: 0 8px 24px rgba(47, 58, 66, .18); font-size: 13px; }
+.sidebar-import-progress { flex: 0 0 auto; margin-bottom: 7px; border: 1px solid #c5ced3; border-radius: 4px; padding: 8px 9px; background: #f3f5f5; }
+.sidebar-import-progress > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 7px; }
+.sidebar-import-progress > div:first-child span { min-width: 0; overflow: hidden; color: #64717a; font-size: 10px; white-space: nowrap; text-overflow: ellipsis; }
+.sidebar-import-progress strong { flex: 0 0 auto; color: var(--accent); font: 600 10px var(--font-mono); }
+.import-progress-track { height: 6px; overflow: hidden; border-radius: 3px; background: #dce3e6; }
+.import-progress-track span { height: 100%; display: block; border-radius: inherit; background: var(--accent); transition: width .18s ease; }
 .console-toggle { position: relative; }
 .console-toggle > span { position: absolute; top: -3px; right: -4px; min-width: 15px; height: 15px; display: grid; place-items: center; padding: 0 3px; border: 2px solid #e4e8eb; border-radius: 8px; color: #f8f3ef; background: var(--accent); font-size: 8px; font-weight: 700; }
 .save-status { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 13px; padding-right: 5px; }
@@ -108,6 +114,8 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 .request-action.pin-action.active { color: var(--accent); }
 .request-action.disabled { opacity: .25; pointer-events: none; }
 .empty-group { padding: 8px 7px; color: #5f656d; font-size: 12px; }
+.empty-group.loadable { width: 100%; border: 0; border-radius: 3px; background: transparent; text-align: left; cursor: pointer; }
+.empty-group.loadable:hover { color: var(--accent); background: color-mix(in srgb, var(--accent) 7%, transparent); }
 .archive-section { margin: 0; border-top: 1px solid #292d31; padding-top: 0; }
 .archive-heading { width: 100%; height: 27px; display: flex; align-items: center; gap: 5px; border: 0; border-radius: 4px; padding: 0 6px; color: #747b84; background: transparent; font-size: 11px; cursor: pointer; }
 .archive-heading:hover { color: #c4c8cd; background: #222529; }
@@ -552,6 +560,9 @@ input[type="checkbox"] { width: 13px; height: 13px; margin: 0 0 0 5px; accent-co
 }
 .theme-dark .topbar { background: #1d2023; }
 .theme-dark .app-notice { border-color: #765c30; color: #e6c687; background: #332b1e; box-shadow: 0 8px 28px rgba(0, 0, 0, .35); }
+.theme-dark .sidebar-import-progress { border-color: #41484e; background: #252a2e; }
+.theme-dark .sidebar-import-progress > div:first-child span { color: #9aa3aa; }
+.theme-dark .import-progress-track { background: #3a4147; }
 .theme-dark .console-toggle > span { border-color: #1d2023; color: #fff6f1; }
 .theme-dark .brand-mark,
 .theme-dark .empty-logo { color: #241812; }

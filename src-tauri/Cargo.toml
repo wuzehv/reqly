@@ -37,6 +37,7 @@ tokio = { version = "1", features = ["net", "time"] }
 uuid = { version = "1", features = ["v4"] }
 if-addrs = "0.13"
 tauri-plugin-dialog = "2"
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 dbus = { version = "0.9", features = ["vendored"] }

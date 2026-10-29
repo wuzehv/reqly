@@ -47,3 +47,9 @@ Available tools:
 - `reqly_run_request`: run a saved request with optional workspace-variable overrides
 
 The MCP server is accessible on the local network and does not currently require authentication. Use a trusted network and restrict access with the system firewall. Browser origins other than localhost are rejected. Saved requests run through Reqly's normal execution pipeline, including workspace variables, Pre-request scripts, Post-response scripts, retries, and supported body types.
+
+## Local Storage
+
+The desktop application stores data in `reqly.db`, an embedded SQLite database in the Tauri application data directory. On the first upgraded launch, an existing `workspace.json` is imported in a transaction and copied to `workspace.pre-sqlite-backup.json`; the original JSON file is not deleted.
+
+The UI loads collection and request summaries at startup and fetches full request details only when a request is selected. Browser-only development mode continues to use the `reqly-workspace` localStorage entry.

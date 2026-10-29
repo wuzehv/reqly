@@ -1,10 +1,11 @@
 use reqwest::{Method, Proxy, header::HeaderMap};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::BTreeSet, error::Error, fs, net::IpAddr, path::PathBuf, time::Instant};
-use tauri::{AppHandle, Manager, State};
+use std::{collections::BTreeSet, error::Error, fs, net::IpAddr, time::Instant};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 mod mcp;
+mod storage;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -44,15 +45,6 @@ pub(crate) struct ResponseOutput {
     body: String,
 }
 
-pub(crate) fn state_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let directory = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| error.to_string())?;
-    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-    Ok(directory.join("workspace.json"))
-}
-
 fn request_error(error: reqwest::Error) -> String {
     let mut messages = vec![error.to_string()];
     let mut source = error.source();
@@ -68,23 +60,41 @@ fn request_error(error: reqwest::Error) -> String {
 
 #[tauri::command]
 fn load_workspace(app: AppHandle) -> Result<Option<Value>, String> {
-    let path = state_path(&app)?;
-    if !path.exists() {
-        return Ok(None);
-    }
-    let content = fs::read_to_string(path).map_err(|error| error.to_string())?;
-    serde_json::from_str(&content)
-        .map(Some)
-        .map_err(|error| error.to_string())
+    storage::load_workspace_index(&app)
 }
 
 #[tauri::command]
 fn save_workspace(app: AppHandle, workspace: Value) -> Result<(), String> {
-    let path = state_path(&app)?;
-    let temporary = path.with_extension("json.tmp");
-    let content = serde_json::to_vec_pretty(&workspace).map_err(|error| error.to_string())?;
-    fs::write(&temporary, content).map_err(|error| error.to_string())?;
-    fs::rename(temporary, path).map_err(|error| error.to_string())
+    storage::save_workspace(&app, &workspace)
+}
+
+#[tauri::command]
+fn load_request(app: AppHandle, request_id: String) -> Result<Option<Value>, String> {
+    storage::get_request(&app, &request_id)
+}
+
+#[tauri::command]
+fn load_group_requests(app: AppHandle, group_id: String) -> Result<Vec<Value>, String> {
+    storage::load_container_requests(&app, &group_id)
+}
+
+#[tauri::command]
+fn locate_request(app: AppHandle, request_id: String) -> Result<Option<Value>, String> {
+    storage::locate_request(&app, &request_id)
+}
+
+#[tauri::command]
+fn search_requests(
+    app: AppHandle,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<Value>, String> {
+    storage::search_requests(&app, &query, limit.unwrap_or(500))
+}
+
+#[tauri::command]
+fn save_request(app: AppHandle, request: Value) -> Result<(), String> {
+    storage::save_request(&app, &request)
 }
 
 #[tauri::command]
@@ -130,6 +140,28 @@ fn get_mcp_addresses(port: u16) -> Result<Vec<String>, String> {
 #[tauri::command]
 fn write_export_file(path: String, content: String) -> Result<(), String> {
     fs::write(path, content).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn import_artifact(
+    app: AppHandle,
+    path: String,
+    target_group_id: Option<String>,
+) -> Result<Value, String> {
+    let progress_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        storage::import_artifact(&app, &path, target_group_id.as_deref(), |percent, label| {
+            let _ = progress_app.emit(
+                "artifact-import-progress",
+                serde_json::json!({
+                    "percent": percent,
+                    "label": label,
+                }),
+            );
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 pub(crate) async fn execute_request(input: RequestInput) -> Result<ResponseOutput, String> {
@@ -211,11 +243,11 @@ pub fn run() {
         .manage(mcp::McpManager::default())
         .setup(|app| {
             let app_handle = app.handle().clone();
+            storage::initialize(&app_handle).map_err(std::io::Error::other)?;
             let manager = app.state::<mcp::McpManager>().inner().clone();
-            let (enabled, port) = state_path(&app_handle)
+            let (enabled, port) = storage::load_workspace_index(&app_handle)
                 .ok()
-                .and_then(|path| fs::read_to_string(path).ok())
-                .and_then(|content| serde_json::from_str::<Value>(&content).ok())
+                .flatten()
                 .map(|workspace| {
                     (
                         workspace
@@ -240,12 +272,18 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             load_workspace,
             save_workspace,
+            load_request,
+            load_group_requests,
+            locate_request,
+            search_requests,
+            save_request,
             send_request,
             configure_mcp,
             get_mcp_status,
             complete_mcp_request,
             get_mcp_addresses,
-            write_export_file
+            write_export_file,
+            import_artifact
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

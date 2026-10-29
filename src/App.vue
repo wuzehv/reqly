@@ -62,7 +62,7 @@ const makeRequest = (name = "新请求", url = "") => ({
 const defaultWorkspace = () => {
   const request = makeRequest("示例请求", "https://httpbin.org/get");
   return {
-    collections: [{ id: uid(), name: "我的接口", expanded: true, preScript: defaultPreScript, requests: [request], groups: [] }],
+    collections: [{ id: uid(), name: "我的接口", expanded: true, preScript: defaultPreScript, requests: [request], requestCount: 1, requestsLoaded: true, groups: [] }],
     selectedRequestId: request.id,
     variables: [pair("baseUrl", "https://httpbin.org")],
     proxy: { enabled: false, url: "http://127.0.0.1:7890", username: "", password: "" },
@@ -86,6 +86,7 @@ const mcpAddressesOpen = ref(false);
 const copiedMcpAddress = ref("");
 const artifactImportInput = ref(null);
 const importingArtifact = ref(false);
+const importProgress = reactive({ open: false, percent: 0, label: "" });
 const searchText = ref("");
 const errorMessage = ref("");
 const bodyFormatError = ref("");
@@ -127,13 +128,21 @@ const resizingRequest = ref(false);
 const resizingConsole = ref(false);
 const resizingSettings = ref(false);
 const requestSessions = new Map();
+const requestDetails = reactive(new Map());
+const loadingRequestGroups = reactive(new Set());
+const requestSearchResults = ref([]);
 const jsonValueEditors = reactive({});
 const noticeMessage = ref("");
 let saveTimer;
 let noticeTimer;
+const requestSaveTimers = new Map();
 let stopWorkspaceListener;
 let stopMcpRequestListener;
+let stopArtifactProgressListener;
 let mcpRequestQueue = Promise.resolve();
+let requestSelectionVersion = 0;
+let requestSearchTimer;
+let suppressWorkspaceSave = 0;
 
 function appendConsole(entry) {
   scriptLogs.value.push({
@@ -175,6 +184,7 @@ const isTauri = () => Boolean(window.__TAURI_INTERNALS__);
 
 const requestContainers = (collection) => [collection, ...(collection.groups || [])];
 const collectionRequests = (collection) => requestContainers(collection).flatMap((group) => group.requests || []);
+const collectionRequestCount = (collection) => requestContainers(collection).reduce((total, group) => total + Number(group.requestCount || group.requests?.length || 0), 0);
 
 function findRequestLocation(requestId) {
   for (const collection of workspace.collections) {
@@ -195,8 +205,129 @@ function resolveRequestGroup(group) {
   return group;
 }
 
+function findRequestGroupById(groupId) {
+  for (const collection of workspace.collections) {
+    if (collection.id === groupId) return { collection, group: collection };
+    const group = (collection.groups || []).find((item) => item.id === groupId);
+    if (group) return { collection, group };
+  }
+  return null;
+}
+
+async function loadGroupRequests(group) {
+  if (!group || group.requestsLoaded || loadingRequestGroups.has(group.id) || !isTauri()) return;
+  loadingRequestGroups.add(group.id);
+  try {
+    const requests = await invoke("load_group_requests", { groupId: group.id });
+    suppressWorkspaceSave += 1;
+    group.requests = requests;
+    group.requestsLoaded = true;
+    group.requestCount = requests.length;
+    await nextTick();
+  } finally {
+    suppressWorkspaceSave = Math.max(0, suppressWorkspaceSave - 1);
+    loadingRequestGroups.delete(group.id);
+  }
+}
+
+async function unloadGroupRequests(group) {
+  if (!isTauri() || !group?.requestsLoaded || selectedRequestGroup.value?.id === group.id) return;
+  await persist();
+  suppressWorkspaceSave += 1;
+  try {
+    group.requests = [];
+    group.requestsLoaded = false;
+    await nextTick();
+  } finally {
+    suppressWorkspaceSave = Math.max(0, suppressWorkspaceSave - 1);
+  }
+}
+
+async function ensureRequestVisible(requestId) {
+  let location = findRequestLocation(requestId);
+  if (location || !isTauri()) return location;
+  const located = await invoke("locate_request", { requestId });
+  if (!located) return null;
+  const container = findRequestGroupById(located.containerId);
+  if (!container) return null;
+  container.collection.expanded = true;
+  container.group.expanded = true;
+  await loadGroupRequests(container.group);
+  return findRequestLocation(requestId);
+}
+
+async function toggleCollection(collection) {
+  collection.expanded = !collection.expanded;
+  if (collection.expanded) await loadGroupRequests(collection);
+  else {
+    await unloadGroupRequests(collection);
+    for (const group of collection.groups || []) await unloadGroupRequests(group);
+  }
+}
+
+async function toggleSubgroup(group) {
+  group.expanded = !group.expanded;
+  if (group.expanded) await loadGroupRequests(group);
+  else await unloadGroupRequests(group);
+}
+
+function requestSummary(request) {
+  return {
+    id: request.id,
+    name: request.name,
+    method: request.method,
+    url: request.url,
+    archived: Boolean(request.archived),
+    pinned: Boolean(request.pinned),
+  };
+}
+
+function normalizeRequest(request, inheritedPostScript = defaultPostScript) {
+  request.archived ??= false;
+  request.pinned ??= false;
+  request.params ||= [pair()];
+  request.headers ||= [pair()];
+  request.bodyType ||= "none";
+  request.body ||= "";
+  request.formBody ||= [pair()];
+  request.formData ||= [pair()];
+  request.postScript ??= inheritedPostScript || defaultPostScript;
+  request.batchData ??= "";
+  return request;
+}
+
+function cacheRequestDetail(request) {
+  requestDetails.delete(request.id);
+  requestDetails.set(request.id, request);
+  while (requestDetails.size > 50) {
+    const oldestId = requestDetails.keys().next().value;
+    if (oldestId === workspace.selectedRequestId) {
+      const selected = requestDetails.get(oldestId);
+      requestDetails.delete(oldestId);
+      requestDetails.set(oldestId, selected);
+      continue;
+    }
+    requestDetails.delete(oldestId);
+  }
+  return request;
+}
+
+async function loadRequestDetail(requestId) {
+  if (!requestId || requestDetails.has(requestId)) return requestDetails.get(requestId) || null;
+  if (!isTauri()) {
+    const request = findRequestLocation(requestId)?.request;
+    return request?.params ? request : null;
+  }
+  const request = await invoke("load_request", { requestId });
+  if (!request) return null;
+  return cacheRequestDetail(normalizeRequest(request));
+}
+
 const selectedRequestLocation = computed(() => findRequestLocation(workspace.selectedRequestId));
-const selectedRequest = computed(() => selectedRequestLocation.value?.request || null);
+const selectedRequest = computed(() =>
+  requestDetails.get(workspace.selectedRequestId)
+    || (selectedRequestLocation.value?.request?.params ? selectedRequestLocation.value.request : null),
+);
 
 const selectedCollection = computed(() => selectedRequestLocation.value?.collection || null);
 const selectedRequestGroup = computed(() => selectedRequestLocation.value?.group || null);
@@ -208,6 +339,23 @@ const scriptCollection = computed(() =>
 const filteredCollections = computed(() => {
   const query = searchText.value.trim().toLowerCase();
   if (!query) return workspace.collections;
+  if (isTauri()) {
+    const byContainer = new Map();
+    for (const request of requestSearchResults.value) {
+      if (!byContainer.has(request.containerId)) byContainer.set(request.containerId, []);
+      byContainer.get(request.containerId).push(request);
+    }
+    return workspace.collections.map((collection) => ({
+      ...collection,
+      expanded: true,
+      requests: byContainer.get(collection.id) || [],
+      groups: (collection.groups || []).map((group) => ({
+        ...group,
+        expanded: true,
+        requests: byContainer.get(group.id) || [],
+      })).filter((group) => group.name.toLowerCase().includes(query) || group.requests.length),
+    })).filter((collection) => collection.name.toLowerCase().includes(query) || collection.requests.length || collection.groups.length);
+  }
   return workspace.collections
     .map((collection) => {
       const collectionMatches = collection.name.toLowerCase().includes(query);
@@ -282,7 +430,7 @@ const selectedBatchResult = computed(() =>
 );
 
 function addCollection() {
-  const collection = { id: uid(), name: `新集合 ${workspace.collections.length + 1}`, expanded: true, preScript: defaultPreScript, requests: [], groups: [] };
+  const collection = { id: uid(), name: `新集合 ${workspace.collections.length + 1}`, expanded: true, preScript: defaultPreScript, requests: [], requestCount: 0, requestsLoaded: true, groups: [] };
   workspace.collections.push(collection);
   beginRenameCollection(collection);
 }
@@ -290,7 +438,7 @@ function addCollection() {
 function addSubgroup(collection) {
   const target = workspace.collections.find((item) => item.id === collection.id);
   if (!target) return;
-  const group = { id: uid(), name: `新分组 ${(target.groups || []).length + 1}`, expanded: true, archiveExpanded: false, requests: [] };
+  const group = { id: uid(), name: `新分组 ${(target.groups || []).length + 1}`, expanded: true, archiveExpanded: false, requests: [], requestCount: 0, requestsLoaded: true };
   target.groups ||= [];
   target.groups.push(group);
   target.expanded = true;
@@ -310,7 +458,10 @@ async function removeSubgroup(collection, group) {
   const requestIds = actual.requests.map((request) => request.id);
   target.groups = target.groups.filter((item) => item.id !== actual.id);
   if (requestIds.includes(workspace.selectedRequestId)) selectFirstRequest();
-  requestIds.forEach((id) => requestSessions.delete(id));
+  requestIds.forEach((id) => {
+    requestSessions.delete(id);
+    requestDetails.delete(id);
+  });
 }
 
 function beginRenameCollection(collection) {
@@ -343,7 +494,10 @@ async function removeCollection(collection) {
   const wasSelected = removedRequestIds.includes(workspace.selectedRequestId);
   workspace.collections = workspace.collections.filter((item) => item.id !== collection.id);
   if (wasSelected) selectFirstRequest();
-  removedRequestIds.forEach((id) => requestSessions.delete(id));
+  removedRequestIds.forEach((id) => {
+    requestSessions.delete(id);
+    requestDetails.delete(id);
+  });
 }
 
 function addRequest(group = selectedRequestGroup.value || selectedCollection.value || workspace.collections[0]) {
@@ -351,7 +505,7 @@ function addRequest(group = selectedRequestGroup.value || selectedCollection.val
     group = resolveRequestGroup(group);
   }
   if (!group) {
-    group = { id: uid(), name: "我的接口", expanded: true, preScript: defaultPreScript, requests: [], groups: [] };
+    group = { id: uid(), name: "我的接口", expanded: true, preScript: defaultPreScript, requests: [], requestCount: 0, requestsLoaded: true, groups: [] };
     workspace.collections.push(group);
   }
   const previousRequest = activeRequests(group).at(-1);
@@ -360,7 +514,13 @@ function addRequest(group = selectedRequestGroup.value || selectedCollection.val
     request.method = previousRequest.method;
     syncParamsFromUrl(request);
   }
-  group.requests.push(request);
+  if (isTauri()) {
+    cacheRequestDetail(request);
+    group.requests.push(requestSummary(request));
+  } else {
+    group.requests.push(request);
+  }
+  group.requestCount = group.requests.length;
   group.expanded = true;
   changeSelectedRequest(request.id);
   nextTick(() => document.querySelector(".request-name")?.select());
@@ -371,13 +531,17 @@ function archiveRequest(group, request) {
   const targetRequest = target?.requests.find((item) => item.id === request.id);
   if (!targetRequest) return;
   targetRequest.archived = true;
+  if (requestDetails.has(request.id)) requestDetails.get(request.id).archived = true;
   target.archiveExpanded = true;
 }
 
 function restoreRequest(group, request) {
   const target = resolveRequestGroup(group);
   const targetRequest = target?.requests.find((item) => item.id === request.id);
-  if (targetRequest) targetRequest.archived = false;
+  if (targetRequest) {
+    targetRequest.archived = false;
+    if (requestDetails.has(request.id)) requestDetails.get(request.id).archived = false;
+  }
 }
 
 function toggleArchive(group) {
@@ -394,8 +558,10 @@ async function removeRequest(group, request) {
   });
   if (!confirmed) return;
   group.requests = group.requests.filter((item) => item.id !== request.id);
+  group.requestCount = group.requests.length;
   if (workspace.selectedRequestId === request.id) selectFirstRequest();
   requestSessions.delete(request.id);
+  requestDetails.delete(request.id);
 }
 
 function moveRequest(group, request, direction) {
@@ -419,7 +585,10 @@ function canMoveRequest(group, request, direction) {
 
 function togglePinRequest(group, request) {
   const target = resolveRequestGroup(group)?.requests.find((item) => item.id === request.id);
-  if (target) target.pinned = !target.pinned;
+  if (target) {
+    target.pinned = !target.pinned;
+    if (requestDetails.has(request.id)) requestDetails.get(request.id).pinned = target.pinned;
+  }
 }
 
 function selectFirstRequest() {
@@ -445,10 +614,15 @@ function saveCurrentRequestSession() {
   });
 }
 
-function changeSelectedRequest(id) {
+async function changeSelectedRequest(id) {
+  const selectionVersion = ++requestSelectionVersion;
   scriptCollectionId.value = "";
   batchOpen.value = false;
-  if (id === workspace.selectedRequestId) return;
+  if (id === workspace.selectedRequestId && selectedRequest.value) return;
+  await ensureRequestVisible(id);
+  await loadRequestDetail(id);
+  if (selectionVersion !== requestSelectionVersion) return;
+  if (!findRequestLocation(id)) return;
   saveCurrentRequestSession();
   batchResults.value = [];
   selectedBatchResultId.value = "";
@@ -608,26 +782,25 @@ function normalizeWorkspace(saved) {
     collection.expanded ??= true;
     collection.archiveExpanded ??= false;
     collection.requests ||= [];
+    collection.requestCount ??= collection.requests.length;
+    collection.requestsLoaded ??= !isTauri();
     collection.groups ||= [];
     collection.groups.forEach((group) => {
       group.expanded ??= true;
       group.archiveExpanded ??= false;
       group.requests ||= [];
+      group.requestCount ??= group.requests.length;
+      group.requestsLoaded ??= !isTauri();
       delete group.preScript;
     });
     collection.preScript ||= collectionRequests(collection).find((request) => request.preScript)?.preScript || defaultPreScript;
     const inheritedPostScript = collection.postScript;
     collectionRequests(collection).forEach((request) => {
-      request.archived ??= false;
-      request.pinned ??= false;
-      request.params ||= [pair()];
-      request.headers ||= [pair()];
-      request.bodyType ||= "none";
-      request.body ||= "";
-      request.formBody ||= [pair()];
-      request.formData ||= [pair()];
-      request.postScript ??= inheritedPostScript || defaultPostScript;
-      request.batchData ??= "";
+      if (request.params || request.bodyType) normalizeRequest(request, inheritedPostScript);
+      else {
+        request.archived ??= false;
+        request.pinned ??= false;
+      }
     });
     delete collection.postScript;
   });
@@ -718,7 +891,11 @@ async function downloadArtifact(format, data, name) {
 async function exportCollection(collection) {
   const source = workspace.collections.find((item) => item.id === collection.id) || collection;
   try {
-    await downloadArtifact("reqly-collection", source, source.name);
+    const exported = cloneData(source);
+    for (const group of requestContainers(exported)) {
+      group.requests = await Promise.all(group.requests.map(async (request) => cloneData(await loadRequestDetail(request.id) || request)));
+    }
+    await downloadArtifact("reqly-collection", exported, source.name);
   } catch (error) {
     showNotice(`导出失败：${formatError(error)}`);
   }
@@ -727,14 +904,64 @@ async function exportCollection(collection) {
 async function exportSubgroup(group) {
   const source = resolveRequestGroup(group);
   try {
-    await downloadArtifact("reqly-subgroup", source, source.name);
+    const exported = cloneData(source);
+    exported.requests = await Promise.all(exported.requests.map(async (request) => cloneData(await loadRequestDetail(request.id) || request)));
+    await downloadArtifact("reqly-subgroup", exported, source.name);
   } catch (error) {
     showNotice(`导出失败：${formatError(error)}`);
   }
 }
 
-function openArtifactImport() {
-  artifactImportInput.value?.click();
+async function openArtifactImport() {
+  if (!isTauri()) {
+    artifactImportInput.value?.click();
+    return;
+  }
+  if (importingArtifact.value) return;
+  try {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const path = await open({ multiple: false, filters: [{ name: "Reqly JSON", extensions: ["json"] }] });
+    if (!path) return;
+    clearTimeout(saveTimer);
+    await persist();
+    const groupUiState = new Map(workspace.collections.flatMap(requestContainers).map((group) => [group.id, {
+      expanded: group.expanded,
+      archiveExpanded: group.archiveExpanded,
+      requestsLoaded: group.requestsLoaded,
+    }]));
+    importingArtifact.value = true;
+    suppressWorkspaceSave += 1;
+    importProgress.open = true;
+    importProgress.percent = 0;
+    importProgress.label = "准备导入";
+    const result = await invoke("import_artifact", {
+      path,
+      targetGroupId: selectedRequestGroup.value?.id || null,
+    });
+    const selectedId = result.selectedRequestId || workspace.selectedRequestId;
+    Object.assign(workspace, normalizeWorkspace(result.workspace));
+    for (const [groupId, state] of groupUiState) {
+      const location = findRequestGroupById(groupId);
+      if (!location) continue;
+      location.group.expanded = state.expanded;
+      location.group.archiveExpanded = state.archiveExpanded;
+      if (state.requestsLoaded) await loadGroupRequests(location.group);
+    }
+    await ensureRequestVisible(selectedId);
+    await loadRequestDetail(selectedId);
+    workspace.selectedRequestId = selectedId;
+    await nextTick();
+    importProgress.percent = 100;
+    importProgress.label = "导入完成";
+    showNotice("导入成功，已创建新副本");
+    window.setTimeout(() => (importProgress.open = false), 700);
+  } catch (error) {
+    importProgress.open = false;
+    showNotice(`导入失败：${formatError(error)}`);
+  } finally {
+    importingArtifact.value = false;
+    suppressWorkspaceSave = Math.max(0, suppressWorkspaceSave - 1);
+  }
 }
 
 function cloneImportedRequest(source) {
@@ -747,30 +974,83 @@ function cloneImportedRequest(source) {
   return request;
 }
 
-function cloneImportedSubgroup(source) {
+async function yieldToUi() {
+  await new Promise((resolve) => window.requestAnimationFrame(resolve));
+}
+
+function readImportFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onprogress = (event) => {
+      if (event.lengthComputable) importProgress.percent = Math.round((event.loaded / event.total) * 30);
+    };
+    reader.onerror = () => reject(reader.error || new Error("读取文件失败"));
+    reader.onload = () => resolve(reader.result);
+    reader.readAsText(file);
+  });
+}
+
+function parseImportContent(content) {
+  return new Promise((resolve, reject) => {
+    const workerUrl = URL.createObjectURL(new Blob([
+      `self.onmessage = (event) => {
+        try { self.postMessage({ value: JSON.parse(event.data) }); }
+        catch (error) { self.postMessage({ error: error.message }); }
+      };`,
+    ], { type: "text/javascript" }));
+    const worker = new Worker(workerUrl);
+    worker.onmessage = (event) => {
+      worker.terminate();
+      URL.revokeObjectURL(workerUrl);
+      if (event.data.error) reject(new Error(event.data.error));
+      else resolve(event.data.value);
+    };
+    worker.onerror = (event) => {
+      worker.terminate();
+      URL.revokeObjectURL(workerUrl);
+      reject(new Error(event.message || "解析导入文件失败"));
+    };
+    worker.postMessage(content);
+  });
+}
+
+async function cloneImportedSubgroup(source, progress) {
   if (!source || typeof source.name !== "string" || !Array.isArray(source.requests || [])) throw new Error("二级分组数据格式无效");
-  return {
-    ...cloneData(source),
+  const { requests: _requests, ...metadata } = source;
+  const group = {
+    ...cloneData(metadata),
     id: uid(),
     name: `${source.name} 副本`,
     expanded: true,
     archiveExpanded: false,
-    requests: (source.requests || []).map(cloneImportedRequest),
+    requests: [],
   };
+  for (const request of source.requests || []) {
+    group.requests.push(cloneImportedRequest(request));
+    await progress();
+  }
+  return group;
 }
 
-function cloneImportedCollection(source) {
+async function cloneImportedCollection(source, progress) {
   if (!source || typeof source.name !== "string" || !Array.isArray(source.requests || [])) throw new Error("分组数据格式无效");
-  return {
-    ...cloneData(source),
+  const { requests: _requests, groups: _groups, ...metadata } = source;
+  const collection = {
+    ...cloneData(metadata),
     id: uid(),
     name: `${source.name} 副本`,
     expanded: true,
     archiveExpanded: false,
     preScript: source.preScript || defaultPreScript,
-    requests: (source.requests || []).map(cloneImportedRequest),
-    groups: (source.groups || []).map(cloneImportedSubgroup),
+    requests: [],
+    groups: [],
   };
+  for (const request of source.requests || []) {
+    collection.requests.push(cloneImportedRequest(request));
+    await progress();
+  }
+  for (const group of source.groups || []) collection.groups.push(await cloneImportedSubgroup(group, progress));
+  return collection;
 }
 
 function parentCollectionForGroup(group) {
@@ -782,35 +1062,79 @@ async function importArtifactFile(event) {
   event.target.value = "";
   if (!file || importingArtifact.value) return;
   importingArtifact.value = true;
+  importProgress.open = true;
+  importProgress.percent = 0;
+  importProgress.label = "正在读取导入文件";
   try {
-    const payload = JSON.parse(await file.text());
+    const content = await readImportFile(file);
+    importProgress.percent = 35;
+    importProgress.label = "正在解析 JSON";
+    await yieldToUi();
+    const payload = await parseImportContent(content);
+    const totalRequests = payload?.format === "reqly-collection"
+      ? (payload.data.requests || []).length + (payload.data.groups || []).reduce((sum, group) => sum + (group.requests || []).length, 0)
+      : payload?.format === "reqly-subgroup" ? (payload.data.requests || []).length : 1;
+    let processedRequests = 0;
+    const updateCloneProgress = async () => {
+      processedRequests += 1;
+      if (processedRequests % 250 !== 0 && processedRequests !== totalRequests) return;
+      importProgress.percent = 40 + Math.round((processedRequests / Math.max(1, totalRequests)) * 30);
+      importProgress.label = `正在生成副本 ${processedRequests.toLocaleString()} / ${totalRequests.toLocaleString()}`;
+      await yieldToUi();
+    };
     const targetGroup = selectedRequestGroup.value;
     if (payload?.format === "reqly-request") {
       let target = targetGroup || workspace.collections[0];
       if (!target) {
-        target = { id: uid(), name: "我的接口", expanded: true, preScript: defaultPreScript, requests: [], groups: [] };
+        target = { id: uid(), name: "我的接口", expanded: true, preScript: defaultPreScript, requests: [], requestCount: 0, requestsLoaded: true, groups: [] };
         workspace.collections.push(target);
       }
       const request = cloneImportedRequest(payload.data);
       request.name = `${request.name} 副本`;
       target.requests.push(request);
       target.expanded = true;
-      changeSelectedRequest(request.id);
+      workspace.selectedRequestId = request.id;
     } else if (payload?.format === "reqly-subgroup") {
       const parent = parentCollectionForGroup(targetGroup) || selectedCollection.value || workspace.collections[0];
       if (!parent) throw new Error("请先创建一个一级分组");
       parent.groups ||= [];
-      parent.groups.push(cloneImportedSubgroup(payload.data));
+      parent.groups.push(await cloneImportedSubgroup(payload.data, updateCloneProgress));
       parent.expanded = true;
     } else if (payload?.format === "reqly-collection") {
-      const collection = cloneImportedCollection(payload.data);
+      const collection = await cloneImportedCollection(payload.data, updateCloneProgress);
       workspace.collections.push(collection);
       workspace.selectedRequestId = collectionRequests(collection).find((request) => !request.archived)?.id || "";
     } else {
       throw new Error("不支持的文件类型，请选择 Reqly 分组或接口导出文件");
     }
+    if (isTauri()) {
+      importProgress.percent = 75;
+      importProgress.label = "正在写入 SQLite 数据库";
+      await yieldToUi();
+      const selectedId = workspace.selectedRequestId;
+      const selectedDetail = findRequestLocation(selectedId)?.request;
+      await persist();
+      importProgress.percent = 96;
+      importProgress.label = "正在刷新分组索引";
+      if (selectedDetail?.params || selectedDetail?.bodyType) cacheRequestDetail(selectedDetail);
+      const index = await invoke("load_workspace");
+      index.selectedRequestId = "";
+      suppressWorkspaceSave += 1;
+      try {
+        Object.assign(workspace, normalizeWorkspace(index));
+        await ensureRequestVisible(selectedId);
+        workspace.selectedRequestId = selectedId;
+        await nextTick();
+      } finally {
+        suppressWorkspaceSave = Math.max(0, suppressWorkspaceSave - 1);
+      }
+    }
+    importProgress.percent = 100;
+    importProgress.label = "导入完成";
     showNotice("导入成功，已创建新副本");
+    window.setTimeout(() => (importProgress.open = false), 700);
   } catch (error) {
+    importProgress.open = false;
     showNotice(`导入失败：${formatError(error)}`);
   } finally {
     importingArtifact.value = false;
@@ -1219,7 +1543,7 @@ async function sendRequest() {
 async function executeMcpRequest({ requestId, variables = {} }) {
   const location = findRequestLocation(requestId);
   const collection = location?.collection;
-  const request = location?.request;
+  const request = await loadRequestDetail(requestId);
   if (!request) throw new Error(`未找到请求：${requestId}`);
   const hasOverrides = variables && Object.keys(variables).length > 0;
   const source = hasOverrides ? applyBatchOverrides(request, variables) : request;
@@ -1444,10 +1768,52 @@ async function persist() {
 watch(
   workspace,
   () => {
-    if (!ready.value) return;
+    if (!ready.value || suppressWorkspaceSave > 0) return;
     saveState.value = "dirty";
     clearTimeout(saveTimer);
     saveTimer = window.setTimeout(persist, 500);
+  },
+  { deep: true },
+);
+
+watch(searchText, (value) => {
+  if (!isTauri()) return;
+  clearTimeout(requestSearchTimer);
+  const query = value.trim();
+  if (!query) {
+    requestSearchResults.value = [];
+    return;
+  }
+  requestSearchTimer = window.setTimeout(async () => {
+    try {
+      requestSearchResults.value = await invoke("search_requests", { query, limit: 500 });
+    } catch (error) {
+      showNotice(`搜索失败：${formatError(error)}`);
+    }
+  }, 800);
+});
+
+watch(
+  selectedRequest,
+  (request) => {
+    if (!ready.value || !isTauri() || !request) return;
+    const location = findRequestLocation(request.id);
+    if (location) Object.assign(location.request, requestSummary(request));
+    saveState.value = "dirty";
+    clearTimeout(requestSaveTimers.get(request.id));
+    const timer = window.setTimeout(async () => {
+      try {
+        saveState.value = "saving";
+        await invoke("save_request", { request: cloneData(request) });
+        saveState.value = "saved";
+      } catch (error) {
+        saveState.value = "error";
+        errorMessage.value = `保存接口失败：${formatError(error)}`;
+      } finally {
+        requestSaveTimers.delete(request.id);
+      }
+    }, 500);
+    requestSaveTimers.set(request.id, timer);
   },
   { deep: true },
 );
@@ -1490,18 +1856,46 @@ onMounted(async () => {
   window.addEventListener("keydown", handleKeydown);
   try {
     if (isTauri()) {
-      stopWorkspaceListener = await listen("workspace-updated", (event) => {
+      stopWorkspaceListener = await listen("workspace-updated", async (event) => {
         const saved = event.payload;
         if (!saved?.collections || !saved?.variables || !saved?.proxy) return;
+        clearTimeout(saveTimer);
+        const selectedId = workspace.selectedRequestId || saved.selectedRequestId;
+        const loadedGroupIds = workspace.collections
+          .flatMap(requestContainers)
+          .filter((group) => group.requestsLoaded)
+          .map((group) => group.id);
         Object.assign(workspace, normalizeWorkspace(cloneData(saved)));
+        for (const groupId of loadedGroupIds) {
+          const location = findRequestGroupById(groupId);
+          if (location) await loadGroupRequests(location.group);
+        }
+        await ensureRequestVisible(selectedId);
+        workspace.selectedRequestId = selectedId;
         showNotice("已同步 MCP 工作区变更");
       });
     }
-    const saved = isTauri()
+    let saved = isTauri()
       ? await invoke("load_workspace")
       : JSON.parse(localStorage.getItem("reqly-workspace") || "null");
-    if (saved?.collections && saved?.variables && saved?.proxy) Object.assign(workspace, normalizeWorkspace(saved));
-    else await persist();
+    if (!saved?.collections || !saved?.variables || !saved?.proxy) {
+      await persist();
+      saved = isTauri() ? await invoke("load_workspace") : cloneData(workspace);
+    }
+    if (isTauri()) {
+      const selectedId = saved.selectedRequestId;
+      saved.selectedRequestId = "";
+      Object.assign(workspace, normalizeWorkspace(saved));
+      for (const collection of workspace.collections) {
+        if (collection.expanded) await loadGroupRequests(collection);
+      }
+      const targetId = selectedId || "";
+      await ensureRequestVisible(targetId);
+      await loadRequestDetail(targetId);
+      workspace.selectedRequestId = targetId;
+    } else {
+      Object.assign(workspace, normalizeWorkspace(saved));
+    }
     if (isTauri()) {
       const status = await invoke("get_mcp_status");
       mcpRuntime.running = status.running;
@@ -1519,6 +1913,11 @@ onMounted(async () => {
           }
         });
       });
+      stopArtifactProgressListener = await listen("artifact-import-progress", (event) => {
+        importProgress.open = true;
+        importProgress.percent = event.payload.percent;
+        importProgress.label = event.payload.label;
+      });
     }
   } catch (error) {
     errorMessage.value = `读取工作区失败：${formatError(error)}`;
@@ -1529,13 +1928,17 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   stopWorkspaceListener?.();
   stopMcpRequestListener?.();
+  stopArtifactProgressListener?.();
   window.removeEventListener("keydown", handleKeydown);
   stopSidebarResize();
   stopRequestResize();
   stopConsoleResize();
   stopSettingsResize();
   clearTimeout(saveTimer);
+  requestSaveTimers.forEach((timer) => clearTimeout(timer));
+  requestSaveTimers.clear();
   clearTimeout(noticeTimer);
+  clearTimeout(requestSearchTimer);
 });
 </script>
 
@@ -1566,7 +1969,7 @@ onBeforeUnmount(() => {
         <div class="collection-list">
           <section v-for="collection in filteredCollections" :key="collection.id" class="collection" :class="{ 'has-selected-request': collectionRequests(collection).some((request) => request.id === workspace.selectedRequestId) }">
             <div class="collection-row">
-              <button class="collapse-button" @click="collection.expanded = !collection.expanded">
+              <button class="collapse-button" @click="toggleCollection(collection)">
                 <ChevronDown v-if="collection.expanded" :size="15" /><ChevronRight v-else :size="15" />
               </button>
               <Folder :size="16" class="folder-icon" />
@@ -1579,7 +1982,7 @@ onBeforeUnmount(() => {
                 @keydown.enter.prevent="$event.currentTarget.blur()"
               />
               <button v-else class="collection-name" @dblclick="beginRenameCollection(collection)">{{ collection.name }}</button>
-              <span class="count">{{ collectionRequests(collection).filter((request) => !request.archived).length }}</span>
+              <span class="count">{{ collectionRequestCount(collection) }}</span>
               <button class="row-action" title="重命名集合" @click="beginRenameCollection(collection)"><Pencil :size="13" /></button>
               <button class="row-action" title="集合脚本" @click="openCollectionScript(collection)"><Code2 :size="14" /></button>
               <button class="row-action" title="添加二级分组" @click="addSubgroup(collection)"><FolderPlus :size="14" /></button>
@@ -1588,6 +1991,8 @@ onBeforeUnmount(() => {
               <button class="row-action danger" title="删除集合" @click="removeCollection(collection)"><Trash2 :size="14" /></button>
             </div>
             <div v-if="collection.expanded" class="request-list">
+              <div v-if="loadingRequestGroups.has(collection.id)" class="empty-group">正在加载接口…</div>
+              <button v-else-if="isTauri() && !searchText.trim() && !collection.requestsLoaded && collection.requestCount > 0" class="empty-group loadable" @click="loadGroupRequests(collection)">接口未加载，点击加载</button>
               <button
                 v-for="request in activeRequests(collection)"
                 :key="request.id"
@@ -1605,7 +2010,7 @@ onBeforeUnmount(() => {
                   <span class="request-action danger" title="删除请求" @click.stop="removeRequest(collection, request)"><X :size="13" /></span>
                 </span>
               </button>
-              <div v-if="!activeRequests(collection).length && !collection.groups.length" class="empty-group">暂无活跃请求</div>
+              <div v-if="collection.requestsLoaded && !activeRequests(collection).length && !collection.groups.length" class="empty-group">暂无活跃请求</div>
               <div v-if="archivedRequests(collection).length" class="archive-section">
                 <button class="archive-heading" @click="toggleArchive(collection)">
                   <ChevronDown v-if="collection.archiveExpanded || searchText.trim()" :size="13" />
@@ -1633,7 +2038,7 @@ onBeforeUnmount(() => {
               </div>
               <section v-for="group in collection.groups" :key="group.id" class="subcollection" :class="{ active: group.requests.some((request) => request.id === workspace.selectedRequestId) }">
                 <div class="subcollection-row">
-                  <button class="collapse-button" @click="group.expanded = !group.expanded"><ChevronDown v-if="group.expanded" :size="15" /><ChevronRight v-else :size="15" /></button>
+                  <button class="collapse-button" @click="toggleSubgroup(group)"><ChevronDown v-if="group.expanded" :size="15" /><ChevronRight v-else :size="15" /></button>
                   <Folder :size="16" class="folder-icon" />
                   <input
                     v-if="editingCollectionId === group.id"
@@ -1644,13 +2049,15 @@ onBeforeUnmount(() => {
                     @keydown.enter.prevent="$event.currentTarget.blur()"
                   />
                   <button v-else class="collection-name" @dblclick="beginRenameCollection(group)">{{ group.name }}</button>
-                  <span class="count">{{ activeRequests(group).length }}</span>
+                  <span class="count">{{ group.requestCount || group.requests.length }}</span>
                   <button class="row-action" title="重命名分组" @click="beginRenameCollection(group)"><Pencil :size="12" /></button>
                   <button class="row-action" title="添加请求" @click="addRequest(group)"><Plus :size="14" /></button>
                   <button class="row-action" title="导出二级分组" @click="exportSubgroup(group)"><Download :size="13" /></button>
                   <button class="row-action danger" title="删除二级分组" @click="removeSubgroup(collection, group)"><Trash2 :size="13" /></button>
                 </div>
                 <div v-if="group.expanded" class="subrequest-list">
+                  <div v-if="loadingRequestGroups.has(group.id)" class="empty-group">正在加载接口…</div>
+                  <button v-else-if="isTauri() && !searchText.trim() && !group.requestsLoaded && group.requestCount > 0" class="empty-group loadable" @click="loadGroupRequests(group)">接口未加载，点击加载</button>
                   <button
                     v-for="request in activeRequests(group)"
                     :key="request.id"
@@ -1668,7 +2075,7 @@ onBeforeUnmount(() => {
                       <span class="request-action danger" title="删除请求" @click.stop="removeRequest(group, request)"><X :size="13" /></span>
                     </span>
                   </button>
-                  <div v-if="!activeRequests(group).length" class="empty-group">暂无活跃请求</div>
+                  <div v-if="group.requestsLoaded && !activeRequests(group).length" class="empty-group">暂无活跃请求</div>
                   <div v-if="archivedRequests(group).length" class="archive-section">
                     <button class="archive-heading" @click="toggleArchive(group)">
                       <ChevronDown v-if="group.archiveExpanded || searchText.trim()" :size="13" /><ChevronRight v-else :size="13" />
@@ -1689,6 +2096,10 @@ onBeforeUnmount(() => {
               </section>
             </div>
           </section>
+        </div>
+        <div v-if="importProgress.open" class="sidebar-import-progress">
+          <div><span>{{ importProgress.label }}</span><strong>{{ importProgress.percent }}%</strong></div>
+          <div class="import-progress-track"><span :style="{ width: `${importProgress.percent}%` }"></span></div>
         </div>
         <div class="sidebar-footer-actions">
           <button class="import-artifact-button" :disabled="importingArtifact" @click="openArtifactImport"><FileInput :size="16" />{{ importingArtifact ? '导入中' : '导入' }}</button>
