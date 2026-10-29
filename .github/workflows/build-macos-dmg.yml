@@ -52,9 +52,9 @@ jobs:
 
       - name: Verify executable architecture
         run: |
-          APP_EXECUTABLE="src-tauri/target/x86_64-apple-darwin/release/bundle/macos/reqly.app/Contents/MacOS/reqly"
+          APP_EXECUTABLE="src-tauri/target/x86_64-apple-darwin/release/reqly"
           file "$APP_EXECUTABLE"
-          lipo -verify_arch x86_64 "$APP_EXECUTABLE"
+          lipo "$APP_EXECUTABLE" -verify_arch x86_64
 
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
