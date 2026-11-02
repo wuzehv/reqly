@@ -40,6 +40,7 @@ const uid = () => crypto.randomUUID();
 const cloneData = (value) => JSON.parse(JSON.stringify(toRaw(value)));
 const pair = (key = "", value = "") => ({ id: uid(), key, value, enabled: true });
 const defaultPreScript = "// 发送集合内的请求前运行\n// pm.environment.set(\"token\", \"your-token\");";
+const defaultPreScriptTemplate = "// 使用无引号占位符，分组可将其绑定到环境变量或固定值";
 const defaultPostScript = "// 收到响应后运行\n// if (pm.response.code === 401) { /* 刷新凭证 */ }";
 const legacyBatchData = "[\n  {\n    \"id\": 1\n  },\n  {\n    \"id\": 2\n  }\n]";
 const themeColors = ["#d65f35", "#3276c3", "#27805f", "#7654b5", "#b94b68"];
@@ -62,12 +63,13 @@ const makeRequest = (name = "新请求", url = "") => ({
 const defaultWorkspace = () => {
   const request = makeRequest("示例请求", "https://httpbin.org/get");
   return {
-    collections: [{ id: uid(), name: "我的接口", expanded: true, preScript: defaultPreScript, requests: [request], requestCount: 1, requestsLoaded: true, groups: [] }],
+    collections: [{ id: uid(), name: "我的接口", expanded: true, preScriptProfileId: "", preScriptPlaceholders: [], requests: [request], requestCount: 1, requestsLoaded: true, groups: [] }],
+    preScriptProfiles: [],
     selectedRequestId: request.id,
     variables: [pair("baseUrl", "https://httpbin.org")],
     proxy: { enabled: false, url: "http://127.0.0.1:7890", username: "", password: "" },
     mcp: { enabled: true, port: 3765 },
-    appearance: { mode: "light", accent: themeColors[0], sidebarWidth: 252, requestEditorHeight: 430, consoleHeight: 300, settingsWidth: 520 },
+    appearance: { mode: "light", accent: themeColors[0], sidebarWidth: 252, requestEditorHeight: 430, consoleHeight: 300, settingsWidth: 520, templateListWidth: 220 },
   };
 };
 
@@ -107,6 +109,12 @@ const batchResponseFullscreen = ref(false);
 const batchProgress = reactive({ current: 0, total: 0 });
 const editingCollectionId = ref("");
 const scriptCollectionId = ref("");
+const scriptTemplateManagerOpen = ref(false);
+const selectedPreScriptProfileId = ref("");
+const templateManagerRef = ref(null);
+const placeholderVariableSearch = reactive({});
+const activePlaceholderVariableMenu = ref("");
+const placeholderVariableMenuPosition = reactive({ top: 0, left: 0, width: 0 });
 const scriptLogs = ref([]);
 const consoleOpen = ref(false);
 const consoleUnread = ref(0);
@@ -127,6 +135,7 @@ const resizingSidebar = ref(false);
 const resizingRequest = ref(false);
 const resizingConsole = ref(false);
 const resizingSettings = ref(false);
+const resizingTemplateList = ref(false);
 const requestSessions = new Map();
 const requestDetails = reactive(new Map());
 const loadingRequestGroups = reactive(new Set());
@@ -344,9 +353,32 @@ const selectedRequest = computed(() =>
 const selectedCollection = computed(() => selectedRequestLocation.value?.collection || null);
 const selectedRequestGroup = computed(() => selectedRequestLocation.value?.group || null);
 
+const scriptGroupLocation = computed(() => findRequestGroupById(scriptCollectionId.value));
 const scriptCollection = computed(() =>
-  workspace.collections.find((collection) => collection.id === scriptCollectionId.value),
+  scriptGroupLocation.value?.group || null,
 );
+
+function preScriptProfile(profileId) {
+  return workspace.preScriptProfiles.find((profile) => profile.id === profileId) || null;
+}
+
+function effectivePreScriptProfileId(group) {
+  if (!group) return "";
+  return parentCollectionForGroup(group)?.preScriptProfileId || "";
+}
+
+function effectivePreScriptProfile(group) {
+  return preScriptProfile(effectivePreScriptProfileId(group));
+}
+
+const selectedPreScriptProfile = computed(() => preScriptProfile(selectedPreScriptProfileId.value));
+const activePreScriptProfile = computed(() => effectivePreScriptProfile(scriptCollection.value));
+const activePreScriptPlaceholders = computed(() => preScriptPlaceholderNames(activePreScriptProfile.value));
+const selectedPreScriptProfileGroups = computed(() => {
+  const profileId = selectedPreScriptProfile.value?.id;
+  if (!profileId) return [];
+  return workspace.collections.filter((collection) => collection.preScriptProfileId === profileId).map((collection) => collection.name);
+});
 
 const filteredCollections = computed(() => {
   const query = searchText.value.trim().toLowerCase();
@@ -442,7 +474,7 @@ const selectedBatchResult = computed(() =>
 );
 
 function addCollection() {
-  const collection = { id: uid(), name: `新集合 ${workspace.collections.length + 1}`, expanded: true, preScript: defaultPreScript, requests: [], requestCount: 0, requestsLoaded: true, groups: [] };
+  const collection = { id: uid(), name: `新集合 ${workspace.collections.length + 1}`, expanded: true, preScriptProfileId: "", preScriptPlaceholders: [], requests: [], requestCount: 0, requestsLoaded: true, groups: [] };
   workspace.collections.push(collection);
   beginRenameCollection(collection);
 }
@@ -492,7 +524,217 @@ function finishRenameCollection(collection) {
 
 function openCollectionScript(collection) {
   saveCurrentRequestSession();
+  scriptTemplateManagerOpen.value = false;
   scriptCollectionId.value = collection.id;
+}
+
+function openPreScriptTemplateManager() {
+  saveCurrentRequestSession();
+  scriptCollectionId.value = "";
+  scriptTemplateManagerOpen.value = true;
+  if (!preScriptProfile(selectedPreScriptProfileId.value)) {
+    selectedPreScriptProfileId.value = workspace.preScriptProfiles[0]?.id || "";
+  }
+  nextTick(() => {
+    if (!templateManagerRef.value) return;
+    const available = templateManagerRef.value.getBoundingClientRect().width;
+    workspace.appearance.templateListWidth = Math.min(
+      workspace.appearance.templateListWidth || 220,
+      Math.max(150, available - 320),
+    );
+  });
+}
+
+function createPreScriptProfile() {
+  const profile = {
+    id: uid(),
+    name: `Pre Script 模板 ${workspace.preScriptProfiles.length + 1}`,
+    script: defaultPreScriptTemplate,
+  };
+  workspace.preScriptProfiles.push(profile);
+  selectedPreScriptProfileId.value = profile.id;
+  nextTick(() => document.querySelector(".profile-name-input")?.select());
+}
+
+async function removePreScriptProfile(profile) {
+  if (!profile) return;
+  const references = workspace.collections.filter((collection) => collection.preScriptProfileId === profile.id);
+  const confirmed = await askConfirm({
+    title: "删除 Pre Script 模板",
+    message: references.length
+      ? `“${profile.name}”正被 ${references.length} 个分组使用。删除后这些分组将不再使用该模板。`
+      : `将删除“${profile.name}”，此操作无法撤销。`,
+    confirmLabel: "删除方案",
+  });
+  if (!confirmed) return;
+  for (const group of references) group.preScriptProfileId = "";
+  workspace.preScriptProfiles = workspace.preScriptProfiles.filter((item) => item.id !== profile.id);
+  if (selectedPreScriptProfileId.value === profile.id) {
+    selectedPreScriptProfileId.value = workspace.preScriptProfiles[0]?.id || "";
+  }
+}
+
+function transformPreScriptPlaceholders(script, resolve) {
+  let output = "";
+  let state = "code";
+  let quote = "";
+  for (let index = 0; index < script.length;) {
+    const pair = script.slice(index, index + 2);
+    if (state === "line-comment") {
+      output += script[index];
+      if (script[index] === "\n") state = "code";
+      index += 1;
+      continue;
+    }
+    if (state === "block-comment") {
+      output += script[index];
+      if (pair === "*/") {
+        output += "/";
+        index += 2;
+        state = "code";
+      } else index += 1;
+      continue;
+    }
+    if (state === "string") {
+      if (script[index] === "\\") {
+        output += script.slice(index, index + 2);
+        index += 2;
+        continue;
+      }
+      if (script[index] === quote) {
+        output += script[index];
+        index += 1;
+        state = "code";
+        continue;
+      }
+    } else {
+      if (pair === "//") {
+        output += pair;
+        index += 2;
+        state = "line-comment";
+        continue;
+      }
+      if (pair === "/*") {
+        output += pair;
+        index += 2;
+        state = "block-comment";
+        continue;
+      }
+      if (["\"", "'", "`"].includes(script[index])) {
+        quote = script[index];
+        state = "string";
+        output += script[index];
+        index += 1;
+        continue;
+      }
+    }
+    if (pair === "{{") {
+      const end = script.indexOf("}}", index + 2);
+      if (end >= 0) {
+        const name = script.slice(index + 2, end).trim();
+        if (name) {
+          const value = String(resolve(name) ?? "");
+          let replacement = JSON.stringify(value);
+          if (state === "string") {
+            replacement = replacement.slice(1, -1);
+            if (quote === "'") replacement = replacement.replaceAll("'", "\\'");
+            if (quote === "`") replacement = replacement.replaceAll("`", "\\`").replaceAll("${", "\\${");
+          }
+          output += replacement;
+          index = end + 2;
+          continue;
+        }
+      }
+    }
+    output += script[index];
+    index += 1;
+  }
+  return output;
+}
+
+function preScriptPlaceholderNames(profile) {
+  if (!profile?.script) return [];
+  const names = new Set();
+  transformPreScriptPlaceholders(profile.script, (name) => {
+    names.add(name);
+    return "";
+  });
+  return [...names];
+}
+
+function ensurePreScriptPlaceholder(group, name) {
+  group.preScriptPlaceholders ||= [];
+  let binding = group.preScriptPlaceholders.find((item) => item.name === name);
+  if (!binding) {
+    binding = { id: uid(), name, sourceType: "variable", source: name };
+    group.preScriptPlaceholders.push(binding);
+  }
+  return binding;
+}
+
+function placeholderSearchKey(group, name) {
+  return `${group.id}:${name}`;
+}
+
+function fuzzyVariableMatch(value, query) {
+  const candidate = value.toLowerCase();
+  return query.toLowerCase().trim().split(/\s+/).filter(Boolean).every((term) => {
+    let cursor = 0;
+    for (const character of term) {
+      cursor = candidate.indexOf(character, cursor);
+      if (cursor < 0) return false;
+      cursor += 1;
+    }
+    return true;
+  });
+}
+
+function placeholderVariableOptions(group, name) {
+  const binding = ensurePreScriptPlaceholder(group, name);
+  const key = placeholderSearchKey(group, name);
+  const query = placeholderVariableSearch[key] ?? binding.source;
+  const values = [...new Set(workspace.variables.filter((item) => item.enabled && item.key).map((item) => item.key))];
+  return values
+    .filter((value) => fuzzyVariableMatch(value, query))
+    .filter((value) => !(query === binding.source && value === binding.source))
+    .sort((left, right) => {
+      const normalized = query.toLowerCase();
+      const leftRank = left.toLowerCase().startsWith(normalized) ? 0 : left.toLowerCase().includes(normalized) ? 1 : 2;
+      const rightRank = right.toLowerCase().startsWith(normalized) ? 0 : right.toLowerCase().includes(normalized) ? 1 : 2;
+      return leftRank - rightRank || left.length - right.length || left.localeCompare(right);
+    });
+}
+
+function openPlaceholderVariableMenu(group, name, event) {
+  const key = placeholderSearchKey(group, name);
+  placeholderVariableSearch[key] = ensurePreScriptPlaceholder(group, name).source;
+  activePlaceholderVariableMenu.value = key;
+  const bounds = event.currentTarget.getBoundingClientRect();
+  const menuHeight = 196;
+  placeholderVariableMenuPosition.top = window.innerHeight - bounds.bottom >= menuHeight
+    ? bounds.bottom + 3
+    : Math.max(6, bounds.top - menuHeight - 3);
+  placeholderVariableMenuPosition.left = bounds.left;
+  placeholderVariableMenuPosition.width = bounds.width;
+  event.currentTarget.select();
+}
+
+function selectPlaceholderVariable(group, name, value) {
+  const key = placeholderSearchKey(group, name);
+  ensurePreScriptPlaceholder(group, name).source = value;
+  placeholderVariableSearch[key] = value;
+  activePlaceholderVariableMenu.value = "";
+}
+
+function selectFirstPlaceholderVariable(group, name) {
+  const [first] = placeholderVariableOptions(group, name);
+  if (first) selectPlaceholderVariable(group, name, first);
+}
+
+function closePlaceholderVariableMenu(key) {
+  window.setTimeout(() => {
+    if (activePlaceholderVariableMenu.value === key) activePlaceholderVariableMenu.value = "";
+  }, 100);
 }
 
 async function removeCollection(collection) {
@@ -524,7 +766,19 @@ async function addRequest(group) {
       return;
     }
   }
-  const previousRequest = activeRequests(group).at(-1);
+  let previousRequest = activeRequests(group).at(-1);
+  const parent = parentCollectionForGroup(group);
+  if (!previousRequest && parent?.id !== group.id) {
+    if (isTauri() && !parent.requestsLoaded) {
+      try {
+        await loadGroupRequests(parent);
+      } catch (error) {
+        showNotice(`加载一级分组失败：${formatError(error)}`);
+        return;
+      }
+    }
+    previousRequest = activeRequests(parent).at(-1);
+  }
   const request = makeRequest("新请求", previousRequest?.url || "");
   if (previousRequest) {
     request.method = previousRequest.method;
@@ -538,8 +792,11 @@ async function addRequest(group) {
   }
   group.requestCount = group.requests.length;
   group.expanded = true;
-  changeSelectedRequest(request.id);
-  nextTick(() => document.querySelector(".request-name")?.select());
+  await changeSelectedRequest(request.id);
+  await nextTick();
+  const nameInput = document.querySelector(".request-name");
+  nameInput?.focus();
+  nameInput?.select();
 }
 
 function archiveRequest(group, request) {
@@ -633,6 +890,7 @@ function saveCurrentRequestSession() {
 async function changeSelectedRequest(id) {
   const selectionVersion = ++requestSelectionVersion;
   scriptCollectionId.value = "";
+  scriptTemplateManagerOpen.value = false;
   batchOpen.value = false;
   if (id === workspace.selectedRequestId && selectedRequest.value) return;
   await ensureRequestVisible(id);
@@ -794,12 +1052,67 @@ function normalizeWorkspace(saved) {
   saved.appearance.requestEditorHeight ||= 430;
   saved.appearance.consoleHeight ||= 300;
   saved.appearance.settingsWidth ||= 520;
+  saved.appearance.templateListWidth ||= 220;
+  const legacyPreScriptWorkspace = !Array.isArray(saved.preScriptProfiles);
+  saved.preScriptProfiles ||= [];
+  saved.preScriptProfiles = saved.preScriptProfiles
+    .filter((profile) => profile && typeof profile === "object")
+    .map((profile, index) => ({
+      id: profile.id || uid(),
+      name: profile.name?.trim() || `Pre Script 模板 ${index + 1}`,
+      script: typeof profile.script === "string" ? profile.script : defaultPreScript,
+    }));
+  const registerLegacyProfile = (script, name) => {
+    if (!script?.trim() || script.trim() === defaultPreScript.trim()) return "";
+    const existing = saved.preScriptProfiles.find((profile) => profile.script?.trim() === script.trim());
+    if (existing) return existing.id;
+    const profile = { id: uid(), name: `${name} Pre Script`, script };
+    saved.preScriptProfiles.push(profile);
+    return profile.id;
+  };
+  const normalizePlaceholders = (container) => {
+    const source = container.preScriptPlaceholders
+      || (container.preScriptReplacements
+        ? container.preScriptReplacements.map((replacement) => ({ name: replacement.target, sourceType: replacement.sourceType, source: replacement.source }))
+        : (container.preScriptVariables || []).map((variable) => ({ name: variable.key, sourceType: "literal", source: variable.value })));
+    container.preScriptPlaceholders = source.filter((binding) => binding.name).map((binding) => ({
+      id: binding.id || uid(),
+      name: binding.name,
+      sourceType: binding.sourceType === "literal" ? "literal" : "variable",
+      source: binding.source ?? binding.name,
+    }));
+    delete container.preScriptReplacements;
+    delete container.preScriptVariables;
+  };
+  const resolveBinding = (container, fallback) => {
+    if (container.preScriptBinding === "inherit") return "inherit";
+    if (container.preScriptBinding === "") return "";
+    const embeddedScript = container.preScriptProfile?.script;
+    if (typeof embeddedScript === "string") {
+      const profile = { id: uid(), name: container.preScriptProfile.name || `${container.name} Pre Script`, script: embeddedScript };
+      saved.preScriptProfiles.push(profile);
+      return profile.id;
+    }
+    if (preScriptProfileFrom(saved, container.preScriptProfileId)) return container.preScriptProfileId;
+    return registerLegacyProfile(container.preScript, container.name) || fallback;
+  };
   saved.collections.forEach((collection) => {
     collection.expanded ??= true;
     collection.archiveExpanded ??= false;
     collection.requests ||= [];
     collection.requestCount ??= collection.requests.length;
     collection.requestsLoaded ??= !isTauri();
+    collection.preScriptProfileId = resolveBinding(collection, "");
+    if (!collection.preScriptProfileId && legacyPreScriptWorkspace) {
+      collection.preScriptProfileId = registerLegacyProfile(
+        collectionRequests(collection).find((request) => request.preScript)?.preScript,
+        collection.name,
+      );
+    }
+    normalizePlaceholders(collection);
+    delete collection.preScript;
+    delete collection.preScriptBinding;
+    delete collection.preScriptProfile;
     collection.groups ||= [];
     collection.groups.forEach((group) => {
       group.expanded ??= true;
@@ -807,9 +1120,14 @@ function normalizeWorkspace(saved) {
       group.requests ||= [];
       group.requestCount ??= group.requests.length;
       group.requestsLoaded ??= !isTauri();
+      delete group.preScriptProfileId;
+      delete group.preScriptPlaceholders;
+      delete group.preScriptReplacements;
+      delete group.preScriptVariables;
       delete group.preScript;
+      delete group.preScriptBinding;
+      delete group.preScriptProfile;
     });
-    collection.preScript ||= collectionRequests(collection).find((request) => request.preScript)?.preScript || defaultPreScript;
     const inheritedPostScript = collection.postScript;
     collectionRequests(collection).forEach((request) => {
       if (request.params || request.bodyType) normalizeRequest(request, inheritedPostScript);
@@ -817,10 +1135,15 @@ function normalizeWorkspace(saved) {
         request.archived ??= false;
         request.pinned ??= false;
       }
+      delete request.preScript;
     });
     delete collection.postScript;
   });
   return saved;
+}
+
+function preScriptProfileFrom(workspaceData, profileId) {
+  return workspaceData.preScriptProfiles?.find((profile) => profile.id === profileId) || null;
 }
 
 async function applyMcpConfig() {
@@ -911,6 +1234,11 @@ async function exportCollection(collection) {
     for (const group of requestContainers(exported)) {
       group.requests = await Promise.all(group.requests.map(async (request) => cloneData(await loadRequestDetail(request.id) || request)));
     }
+    const directProfile = preScriptProfile(source.preScriptProfileId);
+    exported.preScriptBinding = source.preScriptProfileId || "";
+    exported.preScriptProfile = directProfile ? cloneData(directProfile) : null;
+    exported.preScript = directProfile?.script || "";
+    delete exported.preScriptProfileId;
     await downloadArtifact("reqly-collection", exported, source.name);
   } catch (error) {
     showNotice(`导出失败：${formatError(error)}`);
@@ -922,6 +1250,8 @@ async function exportSubgroup(group) {
   try {
     const exported = cloneData(source);
     exported.requests = await Promise.all(exported.requests.map(async (request) => cloneData(await loadRequestDetail(request.id) || request)));
+    delete exported.preScriptProfileId;
+    delete exported.preScriptPlaceholders;
     await downloadArtifact("reqly-subgroup", exported, source.name);
   } catch (error) {
     showNotice(`导出失败：${formatError(error)}`);
@@ -968,6 +1298,7 @@ async function openArtifactImport() {
     await loadRequestDetail(selectedId);
     workspace.selectedRequestId = selectedId;
     await nextTick();
+    await persist();
     importProgress.percent = 100;
     importProgress.label = "导入完成";
     showNotice("导入成功，已创建新副本");
@@ -1032,6 +1363,35 @@ function parseImportContent(content) {
   });
 }
 
+function registerImportedPreScript(script, name) {
+  if (!script?.trim() || script.trim() === defaultPreScript.trim()) return "";
+  const existing = workspace.preScriptProfiles.find((profile) => profile.script?.trim() === script.trim());
+  if (existing) return existing.id;
+  const profile = { id: uid(), name: `${name} Pre Script`, script };
+  workspace.preScriptProfiles.push(profile);
+  return profile.id;
+}
+
+function importedPreScriptBinding(source, fallback) {
+  if (source.preScriptBinding === "") return "";
+  const embedded = source.preScriptProfile;
+  if (embedded && typeof embedded.script === "string") {
+    const profile = { id: uid(), name: embedded.name || `${source.name} Pre Script`, script: embedded.script };
+    workspace.preScriptProfiles.push(profile);
+    return profile.id;
+  }
+  return registerImportedPreScript(source.preScript, source.name)
+    || (preScriptProfile(source.preScriptProfileId) ? source.preScriptProfileId : fallback);
+}
+
+function importedPreScriptPlaceholders(source) {
+  const bindings = source.preScriptPlaceholders
+    || (source.preScriptReplacements
+      ? source.preScriptReplacements.map((replacement) => ({ name: replacement.target, sourceType: replacement.sourceType, source: replacement.source }))
+      : (source.preScriptVariables || []).map((variable) => ({ name: variable.key, sourceType: "literal", source: variable.value })));
+  return bindings.map((binding) => ({ ...cloneData(binding), id: uid() }));
+}
+
 async function cloneImportedSubgroup(source, progress) {
   if (!source || typeof source.name !== "string" || !Array.isArray(source.requests || [])) throw new Error("二级分组数据格式无效");
   const { requests: _requests, ...metadata } = source;
@@ -1043,6 +1403,13 @@ async function cloneImportedSubgroup(source, progress) {
     archiveExpanded: false,
     requests: [],
   };
+  delete group.preScriptProfileId;
+  delete group.preScriptPlaceholders;
+  delete group.preScriptReplacements;
+  delete group.preScript;
+  delete group.preScriptBinding;
+  delete group.preScriptProfile;
+  delete group.preScriptVariables;
   for (const request of source.requests || []) {
     group.requests.push(cloneImportedRequest(request));
     await progress();
@@ -1059,10 +1426,16 @@ async function cloneImportedCollection(source, progress) {
     name: `${source.name} 副本`,
     expanded: true,
     archiveExpanded: false,
-    preScript: source.preScript || defaultPreScript,
+    preScriptProfileId: importedPreScriptBinding(source, ""),
+    preScriptPlaceholders: importedPreScriptPlaceholders(source),
     requests: [],
     groups: [],
   };
+  delete collection.preScript;
+  delete collection.preScriptBinding;
+  delete collection.preScriptProfile;
+  delete collection.preScriptReplacements;
+  delete collection.preScriptVariables;
   for (const request of source.requests || []) {
     collection.requests.push(cloneImportedRequest(request));
     await progress();
@@ -1105,7 +1478,7 @@ async function importArtifactFile(event) {
     if (payload?.format === "reqly-request") {
       let target = targetGroup || workspace.collections[0];
       if (!target) {
-        target = { id: uid(), name: "我的接口", expanded: true, preScript: defaultPreScript, requests: [], requestCount: 0, requestsLoaded: true, groups: [] };
+        target = { id: uid(), name: "我的接口", expanded: true, preScriptProfileId: "", preScriptPlaceholders: [], requests: [], requestCount: 0, requestsLoaded: true, groups: [] };
         workspace.collections.push(target);
       }
       const request = cloneImportedRequest(payload.data);
@@ -1243,6 +1616,28 @@ function startSettingsResize(event) {
   window.addEventListener("pointerup", stopSettingsResize);
 }
 
+function resizeTemplateList(event) {
+  if (!resizingTemplateList.value || !templateManagerRef.value) return;
+  const bounds = templateManagerRef.value.getBoundingClientRect();
+  const maxWidth = Math.max(150, Math.min(420, bounds.width - 320));
+  workspace.appearance.templateListWidth = Math.min(maxWidth, Math.max(150, event.clientX - bounds.left));
+}
+
+function stopTemplateListResize() {
+  resizingTemplateList.value = false;
+  document.body.classList.remove("resizing-sidebar");
+  window.removeEventListener("pointermove", resizeTemplateList);
+  window.removeEventListener("pointerup", stopTemplateListResize);
+}
+
+function startTemplateListResize(event) {
+  event.preventDefault();
+  resizingTemplateList.value = true;
+  document.body.classList.add("resizing-sidebar");
+  window.addEventListener("pointermove", resizeTemplateList);
+  window.addEventListener("pointerup", stopTemplateListResize);
+}
+
 function interpolate(value, variables) {
   return String(value || "").replace(/\{\{\s*([^{}]+?)\s*\}\}/g, (match, key) =>
     Object.prototype.hasOwnProperty.call(variables, key) ? variables[key] : match,
@@ -1313,29 +1708,42 @@ function toggleNamespace(path) {
   collapsedNamespaces[path] = !collapsedNamespaces[path];
 }
 
-function variablesMap() {
-  return Object.fromEntries(
-    workspace.variables.filter((item) => item.enabled && item.key).map((item) => [item.key, item.value]),
-  );
-}
-
 function variablesMapFrom(rows) {
   return Object.fromEntries(
     rows.filter((item) => item.enabled && item.key).map((item) => [item.key, item.value]),
   );
 }
 
-function batchVariables(overrides) {
-  const rows = cloneData(workspace.variables);
+function setVariableRow(rows, key, value, enabled = true) {
+  if (!key) return;
+  const existing = [...rows].reverse().find((item) => item.key === key);
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    if (rows[index].key === key) rows.splice(index, 1);
+  }
+  rows.push({ id: existing?.id || uid(), key, value, enabled });
+}
+
+function resolvePreScript(group, variables) {
+  const collection = parentCollectionForGroup(group);
+  const profile = effectivePreScriptProfile(collection);
+  if (!profile) return "";
+  const values = variablesMapFrom(variables);
+  const bindings = new Map((collection.preScriptPlaceholders || []).map((binding) => [binding.name, binding]));
+  return transformPreScriptPlaceholders(profile.script, (name) => {
+    const binding = bindings.get(name) || { name, sourceType: "variable", source: name };
+    if (binding.sourceType === "literal") return binding.source ?? "";
+    if (!Object.prototype.hasOwnProperty.call(values, binding.source)) {
+      throw new Error(`占位符 ${name} 引用的环境变量不存在：${binding.source}`);
+    }
+    return values[binding.source] ?? "";
+  });
+}
+
+function batchVariables(overrides, baseVariables = workspace.variables) {
+  const rows = cloneData(baseVariables);
   for (const [key, rawValue] of Object.entries(overrides)) {
     const value = batchVariableValue(rawValue);
-    const existing = rows.find((item) => item.key === key);
-    if (existing) {
-      existing.value = value;
-      existing.enabled = true;
-    } else {
-      rows.push({ id: uid(), key, value, enabled: true });
-    }
+    setVariableRow(rows, key, value, true);
   }
   return rows;
 }
@@ -1418,28 +1826,36 @@ function prepareInput(request, variables) {
 }
 
 async function executeHttp(input) {
-  if (isTauri()) return invoke("send_request", { input });
-  const started = performance.now();
-  const result = await fetch(input.url, {
-    method: input.method,
-    headers: Object.fromEntries(input.headers.map((item) => [item.key, item.value])),
-    body: ["GET", "HEAD"].includes(input.method) ? undefined : input.body,
-  });
-  const body = await result.text();
+  let result;
+  if (isTauri()) {
+    result = await invoke("send_request", { input });
+  } else {
+    const started = performance.now();
+    const response = await fetch(input.url, {
+      method: input.method,
+      headers: Object.fromEntries(input.headers.map((item) => [item.key, item.value])),
+      body: ["GET", "HEAD"].includes(input.method) ? undefined : input.body,
+    });
+    const body = await response.text();
+    result = {
+      status: response.status,
+      statusText: response.statusText,
+      durationMs: Math.round(performance.now() - started),
+      size: new Blob([body]).size,
+      headers: [...response.headers.entries()],
+      body,
+    };
+  }
   return {
-    status: result.status,
-    statusText: result.statusText,
-    durationMs: Math.round(performance.now() - started),
-    size: new Blob([body]).size,
-    headers: [...result.headers.entries()],
-    body,
+    ...result,
+    requestHeaders: input.headers.map((item) => [item.key, item.value]),
   };
 }
 
-async function sendSandboxRequest(nestedRequest) {
+async function sendSandboxRequest(nestedRequest, variables = workspace.variables) {
   appendConsole({ phase: "request", level: "info", args: [`${nestedRequest.method} ${nestedRequest.url}`] });
   const result = await executeHttp({
-    ...prepareInput({ ...nestedRequest, params: [] }, variablesMap()),
+    ...prepareInput({ ...nestedRequest, params: [] }, variablesMapFrom(variables)),
     proxy: cloneData(workspace.proxy),
   });
   appendConsole({ phase: "response", level: result.status >= 400 ? "error" : "info", args: [`HTTP ${result.status} ${result.statusText}`, `${result.durationMs} ms`] });
@@ -1453,18 +1869,19 @@ async function sendSandboxRequest(nestedRequest) {
 }
 
 function applyScriptVariables(variables) {
+  const outputKeys = new Set(variables.map((variable) => variable.key));
   const disabledVariables = workspace.variables.filter((item) => !item.enabled);
-  workspace.variables = [...disabledVariables, ...variables];
+  workspace.variables = [...disabledVariables.filter((variable) => !outputKeys.has(variable.key)), ...variables];
 }
 
-async function buildInput(source, variables = cloneData(workspace.variables), persistVariables = true, collection = selectedCollection.value) {
+async function buildInput(source, variables = cloneData(workspace.variables), persistVariables = true, group = selectedRequestGroup.value) {
   const { runPreRequest } = await import("./services/postmanSandbox");
   const execution = await runPreRequest({
-    script: collection?.preScript || "",
+    script: resolvePreScript(group, variables),
     request: cloneData(source),
     variables,
     onConsole: (entry) => appendConsole({ phase: "pre", ...entry }),
-    onRequest: sendSandboxRequest,
+    onRequest: (request) => sendSandboxRequest(request, variables),
   });
   if (persistVariables) applyScriptVariables(execution.variables);
   return {
@@ -1474,12 +1891,12 @@ async function buildInput(source, variables = cloneData(workspace.variables), pe
   };
 }
 
-async function executeRequestLifecycle(source, collection, variables = cloneData(workspace.variables), persistVariables = true) {
-  let currentVariables = variables;
+async function executeRequestLifecycle(source, group, variables = cloneData(workspace.variables), persistVariables = true, overrides = {}) {
+  let currentVariables = batchVariables(overrides, variables);
   let result;
   let retryCount = 0;
   while (true) {
-    const execution = await buildInput(source, currentVariables, persistVariables, collection);
+    const execution = await buildInput(source, currentVariables, persistVariables, group);
     currentVariables = execution.variables;
     appendConsole({ requestName: source.name, phase: "request", level: "info", args: [`${execution.input.method} ${execution.input.url}`] });
     result = await executeHttp(execution.input);
@@ -1489,7 +1906,7 @@ async function executeRequestLifecycle(source, collection, variables = cloneData
       level: result.status >= 400 ? "error" : "info",
       args: [`HTTP ${result.status} ${result.statusText}`, `${result.durationMs} ms`],
     });
-    const postExecution = await runResponseScript(execution.request, result, currentVariables, persistVariables);
+    const postExecution = await runResponseScript(execution.request, result, currentVariables, persistVariables, group);
     currentVariables = postExecution.variables;
     if (!postExecution.retryRequested) break;
     if (retryCount >= 1) {
@@ -1502,7 +1919,7 @@ async function executeRequestLifecycle(source, collection, variables = cloneData
   return result;
 }
 
-async function runResponseScript(request, result, variables = cloneData(workspace.variables), persistVariables = true) {
+async function runResponseScript(request, result, variables = cloneData(workspace.variables), persistVariables = true, group = selectedRequestGroup.value) {
   const script = request.postScript?.trim();
   if (!script || script === defaultPostScript.trim()) return { retryRequested: false, variables };
   const { runPostResponse } = await import("./services/postmanSandbox");
@@ -1512,7 +1929,7 @@ async function runResponseScript(request, result, variables = cloneData(workspac
     response: cloneData(result),
     variables,
     onConsole: (entry) => appendConsole({ phase: "post", ...entry }),
-    onRequest: sendSandboxRequest,
+    onRequest: (nestedRequest) => sendSandboxRequest(nestedRequest, variables),
   });
   if (persistVariables) applyScriptVariables(execution.variables);
   const next = execution.nextRequest;
@@ -1551,7 +1968,7 @@ async function sendRequest() {
   errorMessage.value = "";
   response.value = null;
   try {
-    response.value = await executeRequestLifecycle(selectedRequest.value, selectedCollection.value);
+    response.value = await executeRequestLifecycle(selectedRequest.value, selectedRequestGroup.value);
   } catch (error) {
     errorMessage.value = formatError(error);
     appendConsole({ phase: "request", level: "error", args: [errorMessage.value] });
@@ -1561,14 +1978,13 @@ async function sendRequest() {
 }
 
 async function executeMcpRequest({ requestId, variables = {} }) {
-  const location = findRequestLocation(requestId);
-  const collection = location?.collection;
+  const location = await ensureRequestVisible(requestId);
+  const group = location?.group;
   const request = await loadRequestDetail(requestId);
   if (!request) throw new Error(`未找到请求：${requestId}`);
   const hasOverrides = variables && Object.keys(variables).length > 0;
   const source = hasOverrides ? applyBatchOverrides(request, variables) : request;
-  const executionVariables = hasOverrides ? batchVariables(variables) : cloneData(workspace.variables);
-  const result = await executeRequestLifecycle(source, collection, executionVariables, !hasOverrides);
+  const result = await executeRequestLifecycle(source, group, cloneData(workspace.variables), !hasOverrides, variables);
   setRequestExecutionResult(requestId, result, "");
   return { response: result, scriptsExecuted: true };
 }
@@ -1714,15 +2130,15 @@ async function runBatch() {
     batchResults.value.push(item);
     selectedBatchResultId.value = item.id;
     try {
-      let variables = batchVariables(iteration.variables);
+      let variables = batchVariables(iteration.variables, workspace.variables);
       const iterationRequest = applyBatchOverrides(source, iteration.variables);
       let retryCount = 0;
       while (true) {
-        const execution = await buildInput(iterationRequest, variables, false);
+        const execution = await buildInput(iterationRequest, variables, false, selectedRequestGroup.value);
         variables = execution.variables;
         appendConsole({ phase: "batch", level: "info", args: [`#${index + 1}`, `${execution.input.method} ${execution.input.url}`] });
         item.response = await executeHttp(execution.input);
-        const postExecution = await runResponseScript(execution.request, item.response, variables, false);
+        const postExecution = await runResponseScript(execution.request, item.response, variables, false, selectedRequestGroup.value);
         variables = postExecution.variables;
         if (!postExecution.retryRequested || retryCount >= 1) break;
         retryCount += 1;
@@ -1954,6 +2370,7 @@ onBeforeUnmount(() => {
   stopRequestResize();
   stopConsoleResize();
   stopSettingsResize();
+  stopTemplateListResize();
   clearTimeout(saveTimer);
   requestSaveTimers.forEach((timer) => clearTimeout(timer));
   requestSaveTimers.clear();
@@ -1974,6 +2391,7 @@ onBeforeUnmount(() => {
           {{ saveState === "saved" ? "已保存" : saveState === "saving" ? "保存中" : saveState === "error" ? "保存失败" : "未保存" }}
         </span>
         <button class="icon-button console-toggle" title="全局 Console" @click="toggleConsole"><Terminal :size="18" /><span v-if="consoleUnread">{{ consoleUnread }}</span></button>
+        <button class="icon-button" title="管理 Pre Script 模板" @click="openPreScriptTemplateManager"><Code2 :size="18" /></button>
         <button class="icon-button" title="代理与环境变量" @click="settingsOpen = true"><Settings2 :size="18" /></button>
       </div>
     </header>
@@ -2137,15 +2555,93 @@ onBeforeUnmount(() => {
 
       <div class="sidebar-resizer" title="拖动调整集合栏宽度，双击恢复" @pointerdown="startSidebarResize" @dblclick="workspace.appearance.sidebarWidth = 252"></div>
 
-      <main v-if="scriptCollection" class="collection-script-workbench">
+      <main v-if="scriptTemplateManagerOpen" class="collection-script-workbench">
         <header class="collection-script-header">
-          <div><span class="eyebrow">COLLECTION PRE-REQUEST</span><h2>{{ scriptCollection.name }}</h2></div>
-          <span>脚本自动保存</span>
+          <div><span class="eyebrow">PRE-REQUEST TEMPLATES</span><h2>Pre Script 模板</h2></div>
+          <button class="dialog-button profile-create-button" @click="createPreScriptProfile"><Plus :size="14" />新建模板</button>
+        </header>
+        <div ref="templateManagerRef" class="template-manager-layout" :style="{ '--template-list-width': `${workspace.appearance.templateListWidth || 220}px` }">
+          <aside class="template-list-pane">
+            <button
+              v-for="profile in workspace.preScriptProfiles"
+              :key="profile.id"
+              :class="{ active: selectedPreScriptProfileId === profile.id }"
+              @click="selectedPreScriptProfileId = profile.id"
+            >
+              <Code2 :size="14" /><span>{{ profile.name }}</span>
+            </button>
+            <div v-if="!workspace.preScriptProfiles.length" class="profile-variable-empty">暂无模板</div>
+          </aside>
+          <div class="template-list-resizer" title="拖动调整模板列表宽度，双击恢复" @pointerdown="startTemplateListResize" @dblclick="workspace.appearance.templateListWidth = 220"></div>
+          <section v-if="selectedPreScriptProfile" class="template-editor-pane">
+            <div class="profile-meta-bar">
+              <label><span>模板名称</span><input v-model="selectedPreScriptProfile.name" class="profile-name-input" /></label>
+              <span class="profile-usage" :title="selectedPreScriptProfileGroups.join('\n')">{{ selectedPreScriptProfileGroups.length }} 个分组正在引用</span>
+              <button class="icon-button danger" title="删除模板" @click="removePreScriptProfile(selectedPreScriptProfile)"><Trash2 :size="15" /></button>
+            </div>
+            <div class="editor-caption"><Code2 :size="15" /><span>Pre-request JavaScript</span><span class="hint">模板修改会同步到所有引用分组</span></div>
+            <ScriptEditor
+              :key="`template-${selectedPreScriptProfile.id}-${workspace.appearance.mode}`"
+              v-model="selectedPreScriptProfile.script"
+              :theme="workspace.appearance.mode"
+              :variables="workspace.variables"
+            />
+          </section>
+          <div v-else class="profile-empty"><Code2 :size="22" /><strong>还没有 Pre Script 模板</strong><span>新建模板后可由不同分组引用</span></div>
+        </div>
+      </main>
+
+      <main v-else-if="scriptCollection" class="collection-script-workbench">
+        <header class="collection-script-header">
+          <div><span class="eyebrow">PRE-REQUEST BINDING</span><h2>{{ scriptCollection.name }}</h2></div>
+          <span>一级分组</span>
         </header>
         <div class="collection-script-content">
-          <div class="editor-caption"><Code2 :size="15" /><span>Pre-request JavaScript</span><span class="hint">发送集合内任意请求前运行</span></div>
-          <ScriptEditor :key="`pre-${workspace.appearance.mode}`" v-model="scriptCollection.preScript" :theme="workspace.appearance.mode" :variables="workspace.variables" />
-          <p>集合只提供 Pre-request；Post-response 请在具体请求的 <code>Post Script</code> 标签中配置。</p>
+          <div class="profile-binding-bar">
+            <label>
+              <span>引用模板</span>
+              <select v-model="scriptCollection.preScriptProfileId">
+                <option value="">不使用 Pre Script</option>
+                <option v-for="profile in workspace.preScriptProfiles" :key="profile.id" :value="profile.id">{{ profile.name }}</option>
+              </select>
+            </label>
+            <button class="dialog-button profile-create-button" @click="openPreScriptTemplateManager"><Code2 :size="14" />管理模板</button>
+          </div>
+          <div class="replacement-heading">
+            <div><strong>占位符值</strong><span>模板中直接使用 <code v-text="'{{name}}'"></code>（不要加引号），分组可为其指定环境变量或固定值</span></div>
+          </div>
+          <div class="replacement-list">
+            <div class="replacement-list-head placeholder-list-head"><span>模板占位符</span><span>值来源</span><span>环境变量或固定值</span></div>
+            <div v-for="name in activePreScriptPlaceholders" :key="name" class="replacement-row placeholder-row">
+              <code v-text="`{{${name}}}`"></code>
+              <select v-model="ensurePreScriptPlaceholder(scriptCollection, name).sourceType"><option value="variable">环境变量</option><option value="literal">固定值</option></select>
+              <div v-if="ensurePreScriptPlaceholder(scriptCollection, name).sourceType === 'variable'" class="placeholder-variable-combobox">
+                <input
+                  :value="placeholderVariableSearch[placeholderSearchKey(scriptCollection, name)] ?? ensurePreScriptPlaceholder(scriptCollection, name).source"
+                  placeholder="搜索环境变量"
+                  @focus="openPlaceholderVariableMenu(scriptCollection, name, $event)"
+                  @input="placeholderVariableSearch[placeholderSearchKey(scriptCollection, name)] = $event.currentTarget.value; activePlaceholderVariableMenu = placeholderSearchKey(scriptCollection, name)"
+                  @blur="closePlaceholderVariableMenu(placeholderSearchKey(scriptCollection, name))"
+                  @keydown.enter.prevent="selectFirstPlaceholderVariable(scriptCollection, name)"
+                  @keydown.esc="activePlaceholderVariableMenu = ''"
+                />
+                <Teleport to="body">
+                  <div
+                    v-if="activePlaceholderVariableMenu === placeholderSearchKey(scriptCollection, name)"
+                    class="placeholder-variable-options"
+                    :class="`theme-${workspace.appearance.mode}`"
+                    :style="{ top: `${placeholderVariableMenuPosition.top}px`, left: `${placeholderVariableMenuPosition.left}px`, width: `${placeholderVariableMenuPosition.width}px` }"
+                  >
+                    <button v-for="variable in placeholderVariableOptions(scriptCollection, name)" :key="variable" @mousedown.prevent="selectPlaceholderVariable(scriptCollection, name, variable)">{{ variable }}</button>
+                    <span v-if="!placeholderVariableOptions(scriptCollection, name).length">没有匹配的环境变量</span>
+                  </div>
+                </Teleport>
+              </div>
+              <input v-else v-model="ensurePreScriptPlaceholder(scriptCollection, name).source" placeholder="输入固定值" />
+            </div>
+            <div v-if="!activePreScriptProfile" class="replacement-empty">当前分组未引用模板。</div>
+            <div v-else-if="!activePreScriptPlaceholders.length" class="replacement-empty">当前模板没有占位符。</div>
+          </div>
         </div>
       </main>
 

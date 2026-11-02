@@ -14,8 +14,6 @@ use uuid::Uuid;
 
 use crate::storage;
 
-const DEFAULT_PRE_SCRIPT: &str =
-    "// 发送集合内的请求前运行\n// pm.environment.set(\"token\", \"your-token\");";
 const DEFAULT_POST_SCRIPT: &str =
     "// 收到响应后运行\n// if (pm.response.code === 401) { /* 刷新凭证 */ }";
 
@@ -382,7 +380,7 @@ fn create_collection(app: &AppHandle, arguments: &Value) -> Result<Value, String
     let mut workspace = load_workspace(app)?;
     let collection = json!({
         "id": Uuid::new_v4().to_string(), "name": name, "expanded": true,
-        "preScript": DEFAULT_PRE_SCRIPT, "requests": [], "requestCount": 0,
+        "preScriptProfileId": "", "preScriptPlaceholders": [], "requests": [], "requestCount": 0,
         "requestsLoaded": true, "groups": []
     });
     workspace["collections"]

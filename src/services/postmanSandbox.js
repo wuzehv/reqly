@@ -209,7 +209,11 @@ async function runScript({ target, script, request, response, variables, onReque
   const id = crypto.randomUUID();
   const requestEvent = `execution.request.${id}`;
 
-  const consoleHandler = (_cursor, level, ...args) => onConsole?.({ level, args });
+  const consoleHandler = (_cursor, level, ...args) => {
+    const isCryptoJsDeprecation = level === "warn"
+      && args.some((arg) => String(arg).includes('Using "CryptoJS" is deprecated. Use global "crypto" object instead.'));
+    if (!isCryptoJsDeprecation) onConsole?.({ level, args });
+  };
   const requestHandler = async (_cursor, _executionId, eventId, postmanRequest) => {
     try {
       const response = await onRequest(requestForTransport(postmanRequest));

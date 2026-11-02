@@ -159,15 +159,21 @@ function pmCompletions(context) {
       { label: "formdata", type: "property", detail: "Form-data 参数列表" },
     ]);
   }
-  if (/^CryptoJS\.enc\.\w*$/.test(text)) {
-    return completionResult(context, match, ["Hex", "Base64", "Utf8"].map((label) => ({ label, type: "class" })));
-  }
-  if (/^CryptoJS\.\w*$/.test(text)) {
+  if (/^crypto\.subtle\.\w*$/.test(text)) {
     return completionResult(context, match, [
-      { label: "SHA256", type: "function", detail: "SHA-256" },
-      { label: "HmacSHA256", type: "function", detail: "HMAC SHA-256" },
-      { label: "MD5", type: "function", detail: "MD5" },
-      { label: "enc", type: "property", detail: "编码器" },
+      { label: "digest", type: "function", detail: "digest(algorithm, data)" },
+      { label: "importKey", type: "function", detail: "importKey(format, keyData, algorithm, extractable, usages)" },
+      { label: "sign", type: "function", detail: "sign(algorithm, key, data)" },
+      { label: "verify", type: "function", detail: "verify(algorithm, key, signature, data)" },
+      { label: "encrypt", type: "function", detail: "encrypt(algorithm, key, data)" },
+      { label: "decrypt", type: "function", detail: "decrypt(algorithm, key, data)" },
+    ]);
+  }
+  if (/^crypto\.\w*$/.test(text)) {
+    return completionResult(context, match, [
+      { label: "subtle", type: "property", detail: "Web Crypto SubtleCrypto" },
+      { label: "getRandomValues", type: "function", detail: "getRandomValues(array)" },
+      { label: "randomUUID", type: "function", detail: "randomUUID()" },
     ]);
   }
   if (/^pm\.request\.\w*$/.test(text)) {
@@ -240,7 +246,7 @@ function pmCompletions(context) {
         type: "variable",
         detail: "直接引用环境变量",
       }),
-      { label: "CryptoJS", type: "class", detail: "Postman 加密兼容 API" },
+      { label: "crypto", type: "class", detail: "Web Crypto API" },
     ],
     validFor: /^[\w.]*$/,
   };

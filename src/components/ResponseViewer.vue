@@ -73,6 +73,7 @@ const responseFormatLabel = computed(() => ({
   css: "CSS",
   text: "Text",
 }[responseFormat.value]));
+const requestHeaders = computed(() => props.response?.requestHeaders || []);
 const jsonHasContainers = computed(() =>
   parsedResponseJson.value.valid
     && parsedResponseJson.value.value !== null
@@ -168,8 +169,9 @@ watch(
   <section class="response-viewer" :class="{ fullscreen: isFullscreen }">
     <div class="response-heading">
       <nav class="tabs response-tabs">
-        <button :class="{ active: activeTab === 'body' }" @click="activeTab = 'body'">响应体</button>
+        <button :class="{ active: activeTab === 'request-headers' }" @click="activeTab = 'request-headers'">请求头 <span v-if="response" class="tab-count">{{ requestHeaders.length }}</span></button>
         <button :class="{ active: activeTab === 'headers' }" @click="activeTab = 'headers'">响应头 <span v-if="response" class="tab-count">{{ response.headers.length }}</span></button>
+        <button :class="{ active: activeTab === 'body' }" @click="activeTab = 'body'">响应体</button>
       </nav>
       <div v-if="response" class="response-meta">
         <button v-if="activeTab === 'body' && responseFormat === 'json' && jsonHasContainers" class="json-view-command" :title="jsonRootCollapsed ? '全部展开' : '全部折叠'" @click="setAllJsonCollapsed(!jsonRootCollapsed)"><ChevronDown v-if="jsonRootCollapsed" :size="13" /><ChevronRight v-else :size="13" />{{ jsonRootCollapsed ? '展开' : '折叠' }}</button>
@@ -195,6 +197,7 @@ watch(
         </div>
       </div>
       <ResponseCodeViewer v-else-if="activeTab === 'body'" :key="`${responseFormat}-${theme}`" :content="response.body" :language="responseFormat" :theme="theme" />
+      <div v-else-if="activeTab === 'request-headers'" class="response-headers"><div v-for="([key, value], index) in requestHeaders" :key="`${key}-${index}`"><strong>{{ key }}</strong><span>{{ value }}</span></div></div>
       <div v-else class="response-headers"><div v-for="([key, value], index) in response.headers" :key="`${key}-${index}`"><strong>{{ key }}</strong><span>{{ value }}</span></div></div>
     </template>
     <div v-else class="response-empty"><Braces :size="30" /><strong>等待响应</strong><span>{{ emptyText }}</span></div>
