@@ -130,11 +130,13 @@ const resizingSettings = ref(false);
 const requestSessions = new Map();
 const requestDetails = reactive(new Map());
 const loadingRequestGroups = reactive(new Set());
+const requestGroupLoadPromises = new Map();
 const requestSearchResults = ref([]);
 const jsonValueEditors = reactive({});
 const noticeMessage = ref("");
 let saveTimer;
 let noticeTimer;
+let importProgressTimer;
 const requestSaveTimers = new Map();
 let stopWorkspaceListener;
 let stopMcpRequestListener;
@@ -215,17 +217,27 @@ function findRequestGroupById(groupId) {
 }
 
 async function loadGroupRequests(group) {
-  if (!group || group.requestsLoaded || loadingRequestGroups.has(group.id) || !isTauri()) return;
+  if (!group || group.requestsLoaded || !isTauri()) return;
+  const pendingLoad = requestGroupLoadPromises.get(group.id);
+  if (pendingLoad) return pendingLoad;
   loadingRequestGroups.add(group.id);
-  try {
+  const load = (async () => {
     const requests = await invoke("load_group_requests", { groupId: group.id });
     suppressWorkspaceSave += 1;
-    group.requests = requests;
-    group.requestsLoaded = true;
-    group.requestCount = requests.length;
-    await nextTick();
+    try {
+      group.requests = requests;
+      group.requestsLoaded = true;
+      group.requestCount = requests.length;
+      await nextTick();
+    } finally {
+      suppressWorkspaceSave = Math.max(0, suppressWorkspaceSave - 1);
+    }
+  })();
+  requestGroupLoadPromises.set(group.id, load);
+  try {
+    await load;
   } finally {
-    suppressWorkspaceSave = Math.max(0, suppressWorkspaceSave - 1);
+    requestGroupLoadPromises.delete(group.id);
     loadingRequestGroups.delete(group.id);
   }
 }
@@ -500,13 +512,17 @@ async function removeCollection(collection) {
   });
 }
 
-function addRequest(group = selectedRequestGroup.value || selectedCollection.value || workspace.collections[0]) {
-  if (group) {
-    group = resolveRequestGroup(group);
-  }
-  if (!group) {
-    group = { id: uid(), name: "我的接口", expanded: true, preScript: defaultPreScript, requests: [], requestCount: 0, requestsLoaded: true, groups: [] };
-    workspace.collections.push(group);
+async function addRequest(group) {
+  if (!group) return;
+  group = resolveRequestGroup(group);
+  if (!group) return;
+  if (isTauri() && !group.requestsLoaded) {
+    try {
+      await loadGroupRequests(group);
+    } catch (error) {
+      showNotice(`加载分组失败：${formatError(error)}`);
+      return;
+    }
   }
   const previousRequest = activeRequests(group).at(-1);
   const request = makeRequest("新请求", previousRequest?.url || "");
@@ -929,6 +945,7 @@ async function openArtifactImport() {
       archiveExpanded: group.archiveExpanded,
       requestsLoaded: group.requestsLoaded,
     }]));
+    clearTimeout(importProgressTimer);
     importingArtifact.value = true;
     suppressWorkspaceSave += 1;
     importProgress.open = true;
@@ -954,8 +971,9 @@ async function openArtifactImport() {
     importProgress.percent = 100;
     importProgress.label = "导入完成";
     showNotice("导入成功，已创建新副本");
-    window.setTimeout(() => (importProgress.open = false), 700);
+    importProgressTimer = window.setTimeout(() => (importProgress.open = false), 1200);
   } catch (error) {
+    clearTimeout(importProgressTimer);
     importProgress.open = false;
     showNotice(`导入失败：${formatError(error)}`);
   } finally {
@@ -1061,6 +1079,7 @@ async function importArtifactFile(event) {
   const [file] = event.target.files || [];
   event.target.value = "";
   if (!file || importingArtifact.value) return;
+  clearTimeout(importProgressTimer);
   importingArtifact.value = true;
   importProgress.open = true;
   importProgress.percent = 0;
@@ -1132,8 +1151,9 @@ async function importArtifactFile(event) {
     importProgress.percent = 100;
     importProgress.label = "导入完成";
     showNotice("导入成功，已创建新副本");
-    window.setTimeout(() => (importProgress.open = false), 700);
+    importProgressTimer = window.setTimeout(() => (importProgress.open = false), 1200);
   } catch (error) {
+    clearTimeout(importProgressTimer);
     importProgress.open = false;
     showNotice(`导入失败：${formatError(error)}`);
   } finally {
@@ -1938,6 +1958,7 @@ onBeforeUnmount(() => {
   requestSaveTimers.forEach((timer) => clearTimeout(timer));
   requestSaveTimers.clear();
   clearTimeout(noticeTimer);
+  clearTimeout(importProgressTimer);
   clearTimeout(requestSearchTimer);
 });
 </script>
@@ -1961,10 +1982,25 @@ onBeforeUnmount(() => {
     <div class="workspace-layout" :style="{ '--sidebar-width': `${workspace.appearance.sidebarWidth || 252}px` }">
       <aside class="sidebar">
         <div class="sidebar-heading">
-          <div><span class="eyebrow">WORKSPACE</span><strong>接口集合</strong></div>
-          <button class="icon-button" title="新建集合" @click="addCollection"><FolderPlus :size="17" /></button>
+          <div class="sidebar-heading-title"><span class="eyebrow">WORKSPACE</span><strong>接口集合</strong></div>
+          <div class="sidebar-heading-actions">
+            <button class="icon-button sidebar-import-button" :disabled="importingArtifact" :title="importingArtifact ? importProgress.label : '导入'" @click="openArtifactImport"><FileInput :size="17" /></button>
+            <button class="icon-button" title="新建集合" @click="addCollection"><FolderPlus :size="17" /></button>
+          </div>
         </div>
         <input ref="artifactImportInput" class="artifact-import-input" type="file" accept="application/json,.json" @change="importArtifactFile" />
+        <div
+          v-if="importProgress.open"
+          class="sidebar-import-progress"
+          role="progressbar"
+          :aria-label="importProgress.label"
+          :aria-valuenow="importProgress.percent"
+          aria-valuemin="0"
+          aria-valuemax="100"
+        >
+          <div><span>{{ importProgress.label }}</span><strong>{{ importProgress.percent }}%</strong></div>
+          <div class="import-progress-track"><span :style="{ width: `${importProgress.percent}%` }"></span></div>
+        </div>
         <label class="search-box"><Search :size="15" /><input v-model="searchText" placeholder="搜索请求" /></label>
         <div class="collection-list">
           <section v-for="collection in filteredCollections" :key="collection.id" class="collection" :class="{ 'has-selected-request': collectionRequests(collection).some((request) => request.id === workspace.selectedRequestId) }">
@@ -2096,14 +2132,6 @@ onBeforeUnmount(() => {
               </section>
             </div>
           </section>
-        </div>
-        <div v-if="importProgress.open" class="sidebar-import-progress">
-          <div><span>{{ importProgress.label }}</span><strong>{{ importProgress.percent }}%</strong></div>
-          <div class="import-progress-track"><span :style="{ width: `${importProgress.percent}%` }"></span></div>
-        </div>
-        <div class="sidebar-footer-actions">
-          <button class="import-artifact-button" :disabled="importingArtifact" @click="openArtifactImport"><FileInput :size="16" />{{ importingArtifact ? '导入中' : '导入' }}</button>
-          <button class="new-request-button" @click="addRequest()"><Plus :size="16" />新建请求</button>
         </div>
       </aside>
 
@@ -2256,7 +2284,7 @@ onBeforeUnmount(() => {
         <ResponseViewer v-model:tab="responseTab" v-model:fullscreen="responseFullscreen" :response="response" :error-message="errorMessage" :theme="workspace.appearance.mode" />
       </main>
 
-      <main v-else class="no-selection"><div class="empty-logo">R</div><strong>还没有请求</strong><span>从左侧新建一个集合或请求</span><button class="send-button" @click="addRequest()"><Plus :size="17" />新建请求</button></main>
+      <main v-else class="no-selection"><div class="empty-logo">R</div><strong>还没有请求</strong><span>从左侧分组创建请求</span></main>
     </div>
 
     <div v-if="batchOpen" class="batch-backdrop" @click.self="!batchRunning && (batchOpen = false)">
