@@ -1,6 +1,8 @@
 <script setup>
 import { computed, reactive, ref, watch } from "vue";
 import {
+  ArrowDownLeft,
+  ArrowUpRight,
   Braces,
   Check,
   ChevronDown,
@@ -169,9 +171,9 @@ watch(
   <section class="response-viewer" :class="{ fullscreen: isFullscreen }">
     <div class="response-heading">
       <nav class="tabs response-tabs">
-        <button :class="{ active: activeTab === 'request-headers' }" @click="activeTab = 'request-headers'">请求头 <span v-if="response" class="tab-count">{{ requestHeaders.length }}</span></button>
-        <button :class="{ active: activeTab === 'headers' }" @click="activeTab = 'headers'">响应头 <span v-if="response" class="tab-count">{{ response.headers.length }}</span></button>
-        <button :class="{ active: activeTab === 'body' }" @click="activeTab = 'body'">响应体</button>
+        <button :class="{ active: activeTab === 'request-headers' }" @click="activeTab = 'request-headers'"><ArrowUpRight :size="14" />请求头 <span v-if="response" class="tab-count">{{ requestHeaders.length }}</span></button>
+        <button :class="{ active: activeTab === 'headers' }" @click="activeTab = 'headers'"><ArrowDownLeft :size="14" />响应头 <span v-if="response" class="tab-count">{{ response.headers.length }}</span></button>
+        <button :class="{ active: activeTab === 'body' }" @click="activeTab = 'body'"><Braces :size="14" />响应体</button>
       </nav>
       <div v-if="response" class="response-meta">
         <button v-if="activeTab === 'body' && responseFormat === 'json' && jsonHasContainers" class="json-view-command" :title="jsonRootCollapsed ? '全部展开' : '全部折叠'" @click="setAllJsonCollapsed(!jsonRootCollapsed)"><ChevronDown v-if="jsonRootCollapsed" :size="13" /><ChevronRight v-else :size="13" />{{ jsonRootCollapsed ? '展开' : '折叠' }}</button>

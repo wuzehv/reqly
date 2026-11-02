@@ -231,11 +231,19 @@ input[type="checkbox"] { width: 13px; height: 13px; margin: 0 0 0 5px; accent-co
 .response-viewer { min-width: 0; min-height: 0; display: flex; flex-direction: column; border: 1px solid #9fc5b5; border-left: 0; background: var(--panel); }
 .response-viewer.fullscreen { position: fixed; inset: 0; z-index: 40; border: 1px solid #9fc5b5; background: var(--panel); }
 .response-heading { min-height: 42px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line-soft); background: #e8ecef; }
-.response-tabs { height: 42px; border: 0; }
-.response-meta { display: flex; align-items: center; gap: 16px; padding-right: 18px; color: #888e96; font: 12px var(--font-mono); }
+.response-tabs { align-self: center; height: 32px; gap: 2px; margin-left: 12px; border: 0; border-radius: 5px; padding: 3px; background: #dfe5e8; }
+.response-tabs button { height: 24px; border-radius: 3px; padding: 0 9px; color: #66727b; font-size: 12px; font-weight: 500; }
+.response-tabs button:hover { color: #29343c; background: rgba(255, 255, 255, .42); }
+.response-tabs button.active { color: #29343c; background: #f7f8f8; box-shadow: 0 1px 2px rgba(43, 55, 63, .14); }
+.response-tabs button.active::after { display: none; }
+.response-tabs button > svg { flex: 0 0 auto; color: #7b8790; }
+.response-tabs button.active > svg { color: var(--accent); }
+.response-tabs .tab-count { min-width: 17px; height: 17px; border-radius: 3px; color: #69757d; background: #cfd8dc; font-size: 10px; }
+.response-tabs button.active .tab-count { color: #46535c; background: #e1e7e9; }
+.response-meta { display: flex; align-items: center; gap: 16px; padding-right: 16px; color: #888e96; font: 12px var(--font-mono); }
 .response-meta > span { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
 .response-meta .response-format { height: 20px; border: 1px solid #c7d0d5; border-radius: 3px; padding: 0 6px; color: #58666f; background: #f2f4f5; font: 600 10px var(--font-sans); }
-.json-view-command { height: 25px; display: flex; align-items: center; gap: 3px; border: 0; border-radius: 3px; padding: 0 5px; color: #66727b; background: transparent; font-size: 10px; cursor: pointer; }
+.json-view-command { height: 25px; display: flex; align-items: center; gap: 3px; border: 0; border-radius: 3px; padding: 0 5px; color: #66727b; background: transparent; font: 12px var(--font-sans); cursor: pointer; }
 .json-view-command:hover { color: #29343c; background: #dce2e5; }
 .response-meta .status-ok { color: var(--green); font-weight: 500; }
 .response-meta .status-warn { color: var(--yellow); }
@@ -701,6 +709,14 @@ input[type="checkbox"] { width: 13px; height: 13px; margin: 0 0 0 5px; accent-co
 .theme-dark .editor-caption { color: #afb4ba; }
 .theme-dark .response-viewer { border-color: #46735f; border-left: 0; background: var(--panel); }
 .theme-dark .response-heading { background: #1e2124; }
+.theme-dark .response-tabs { background: #292d31; }
+.theme-dark .response-tabs button { color: #9ba3aa; }
+.theme-dark .response-tabs button:hover { color: #e2e5e7; background: #34393e; }
+.theme-dark .response-tabs button.active { color: #eef0f1; background: #3a4046; box-shadow: 0 1px 2px rgba(0, 0, 0, .28); }
+.theme-dark .response-tabs button > svg { color: #89939b; }
+.theme-dark .response-tabs button.active > svg { color: var(--accent); }
+.theme-dark .response-tabs .tab-count { color: #aab2b8; background: #202428; }
+.theme-dark .response-tabs button.active .tab-count { color: #d7dcdf; background: #505860; }
 .theme-dark .response-meta { color: #9ba2a9; }
 .theme-dark .response-meta .response-format { border-color: #454c52; color: #b7bec4; background: #292d31; }
 .theme-dark .json-view-command { color: #a3aab1; }
@@ -820,7 +836,7 @@ input[type="checkbox"] { width: 13px; height: 13px; margin: 0 0 0 5px; accent-co
   .url-bar { grid-template-columns: 90px minmax(0, 1fr) 90px 39px; padding-right: 14px; padding-left: 14px; }
   .request-title-row, .tabs { padding-right: 14px; padding-left: 14px; }
   .request-panel { padding-right: 14px; padding-left: 14px; }
-  .response-meta { gap: 9px; padding-right: 10px; }
+  .response-meta { gap: 9px; padding-right: 9px; }
   .batch-content { grid-template-columns: minmax(260px, 38%) minmax(0, 1fr); }
 }
 

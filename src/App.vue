@@ -37,6 +37,15 @@ import {
 } from "@lucide/vue";
 
 const uid = () => crypto.randomUUID();
+function importedProfileName(name, profiles) {
+  const existingNames = new Set(profiles.map((profile) => profile.name));
+  let candidate;
+  do {
+    const number = crypto.getRandomValues(new Uint32Array(1))[0] % 1000000;
+    candidate = `${name} (${String(number).padStart(6, "0")})`;
+  } while (existingNames.has(candidate));
+  return candidate;
+}
 const cloneData = (value) => JSON.parse(JSON.stringify(toRaw(value)));
 const pair = (key = "", value = "") => ({ id: uid(), key, value, enabled: true });
 const defaultPreScript = "// 发送集合内的请求前运行\n// pm.environment.set(\"token\", \"your-token\");";
@@ -696,7 +705,6 @@ function placeholderVariableOptions(group, name) {
   const values = [...new Set(workspace.variables.filter((item) => item.enabled && item.key).map((item) => item.key))];
   return values
     .filter((value) => fuzzyVariableMatch(value, query))
-    .filter((value) => !(query === binding.source && value === binding.source))
     .sort((left, right) => {
       const normalized = query.toLowerCase();
       const leftRank = left.toLowerCase().startsWith(normalized) ? 0 : left.toLowerCase().includes(normalized) ? 1 : 2;
@@ -1089,7 +1097,8 @@ function normalizeWorkspace(saved) {
     if (container.preScriptBinding === "") return "";
     const embeddedScript = container.preScriptProfile?.script;
     if (typeof embeddedScript === "string") {
-      const profile = { id: uid(), name: container.preScriptProfile.name || `${container.name} Pre Script`, script: embeddedScript };
+      const baseName = container.preScriptProfile.name || `${container.name} Pre Script`;
+      const profile = { id: uid(), name: importedProfileName(baseName, saved.preScriptProfiles), script: embeddedScript };
       saved.preScriptProfiles.push(profile);
       return profile.id;
     }
@@ -1376,7 +1385,8 @@ function importedPreScriptBinding(source, fallback) {
   if (source.preScriptBinding === "") return "";
   const embedded = source.preScriptProfile;
   if (embedded && typeof embedded.script === "string") {
-    const profile = { id: uid(), name: embedded.name || `${source.name} Pre Script`, script: embedded.script };
+    const baseName = embedded.name || `${source.name} Pre Script`;
+    const profile = { id: uid(), name: importedProfileName(baseName, workspace.preScriptProfiles), script: embedded.script };
     workspace.preScriptProfiles.push(profile);
     return profile.id;
   }
