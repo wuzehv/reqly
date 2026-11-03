@@ -2311,13 +2311,19 @@ onMounted(async () => {
           .flatMap(requestContainers)
           .filter((group) => group.requestsLoaded)
           .map((group) => group.id);
-        Object.assign(workspace, normalizeWorkspace(cloneData(saved)));
-        for (const groupId of loadedGroupIds) {
-          const location = findRequestGroupById(groupId);
-          if (location) await loadGroupRequests(location.group);
+        suppressWorkspaceSave += 1;
+        try {
+          Object.assign(workspace, normalizeWorkspace(cloneData(saved)));
+          for (const groupId of loadedGroupIds) {
+            const location = findRequestGroupById(groupId);
+            if (location) await loadGroupRequests(location.group);
+          }
+          await ensureRequestVisible(selectedId);
+          workspace.selectedRequestId = selectedId;
+          await nextTick();
+        } finally {
+          suppressWorkspaceSave = Math.max(0, suppressWorkspaceSave - 1);
         }
-        await ensureRequestVisible(selectedId);
-        workspace.selectedRequestId = selectedId;
         showNotice("已同步 MCP 工作区变更");
       });
     }

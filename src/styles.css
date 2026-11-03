@@ -79,7 +79,7 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 .collection.has-selected-request > .collection-row .collection-name { color: #26323a; }
 .collapse-button { width: 22px; height: 28px; color: #6e747d; }
 .folder-icon { flex: 0 0 auto; color: #bc875d; margin-right: 7px; }
-.collection-name { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; text-align: left; border: 0; padding: 0; background: transparent; font-size: 14px; font-weight: 600; cursor: pointer; }
+.collection-name { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; text-align: left; border: 0; padding: 0; background: transparent; font: 600 14px/1.2 var(--font-sans); letter-spacing: 0; cursor: pointer; }
 .collection-name-input { flex: 1; min-width: 0; height: 24px; border: 1px solid #555c65; border-radius: 3px; padding: 0 5px; outline: 0; color: #f0f0f0; background: #151719; font-size: 13px; font-weight: 600; }
 .count { min-width: 20px; height: 18px; display: inline-grid; place-items: center; flex: 0 0 auto; margin-right: 4px; border: 1px solid #c4cdd2; border-radius: 4px; padding: 0 5px; color: #66737c; background: #f2f4f5; font: 600 11px var(--font-mono); line-height: 1; }
 .row-action { width: 24px; height: 24px; border-radius: 4px; color: #737983; opacity: 0; }
@@ -91,7 +91,6 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 .subcollection-row:hover { border-color: #bbc6cc; background: #e6ebed; }
 .subcollection.active > .subcollection-row { border-color: color-mix(in srgb, var(--accent) 40%, #d5dde1); box-shadow: inset 2px 0 var(--accent); color: var(--text); }
 .subcollection-row .folder-icon { margin-right: 7px; }
-.subcollection-row .collection-name { font-size: 14px; font-weight: 600; }
 .subcollection-row .count { min-width: 20px; height: 18px; border-color: #c4cdd2; padding: 0 5px; background: #f2f4f5; font-size: 11px; }
 .subrequest-list { display: flex; flex-direction: column; gap: 3px; margin: 3px 0 0 13px; padding: 0 0 0 8px; border-left: 1px solid var(--line); }
 .request-item { width: 100%; height: 32px; display: grid; grid-template-columns: 43px minmax(0, 1fr) 102px; align-items: center; border: 0; border-radius: 4px; padding: 0 3px 0 7px; background: transparent; cursor: pointer; text-align: left; }

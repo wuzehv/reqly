@@ -27,6 +27,7 @@ struct McpState {
 pub(crate) struct McpManager {
     running: Arc<Mutex<Option<RunningServer>>>,
     pending_requests: Arc<Mutex<HashMap<String, oneshot::Sender<Result<Value, String>>>>>,
+    workspace_mutations: Arc<Mutex<()>>,
 }
 
 struct RunningServer {
@@ -263,16 +264,74 @@ fn tool_definitions() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "collectionId": { "type": "string" },
-                    "name": { "type": "string", "minLength": 1 },
+                    "name": { "type": "string", "minLength": 1, "pattern": "\\S" },
                     "method": { "type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
                     "url": { "type": "string", "minLength": 1 },
                     "params": { "type": "object", "additionalProperties": { "type": ["string", "number", "boolean", "null"] } },
                     "headers": { "type": "object", "additionalProperties": { "type": ["string", "number", "boolean", "null"] } },
                     "bodyType": { "type": "string", "enum": ["none", "json", "text", "form"] },
-                    "body": { "description": "Raw JSON/text body, or an object for form body" }
+                    "body": { "description": "Raw JSON/text body, or an object for form body" },
+                    "postScript": { "type": "string", "description": "Optional Post-response JavaScript for this request." }
                 },
                 "required": ["collectionId", "name", "method", "url"],
                 "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "reqly_list_script_templates",
+            "description": "List reusable Reqly Pre Script templates and the top-level collections that reference them.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        }),
+        json!({
+            "name": "reqly_create_script_template",
+            "description": "Create a reusable Pre Script template. Templates may contain {{placeholder}} expressions configured when bound to a collection.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "minLength": 1, "pattern": "\\S" },
+                    "script": { "type": "string" }
+                },
+                "required": ["name", "script"], "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "reqly_update_script_template",
+            "description": "Update the name and/or JavaScript of an existing Reqly Pre Script template.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "templateId": { "type": "string" },
+                    "name": { "type": "string", "minLength": 1, "pattern": "\\S" },
+                    "script": { "type": "string" }
+                },
+                "required": ["templateId"],
+                "anyOf": [{ "required": ["name"] }, { "required": ["script"] }],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "reqly_bind_script_template",
+            "description": "Bind or unbind a Pre Script template on a top-level collection. Set templateId to null to unbind. Optional placeholders replace the collection placeholder configuration.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "collectionId": { "type": "string" },
+                    "templateId": { "type": ["string", "null"] },
+                    "placeholders": {
+                        "type": "object",
+                        "description": "Map placeholder names to { sourceType: variable|literal, source: environment variable name or fixed value }.",
+                        "additionalProperties": {
+                            "type": "object",
+                            "properties": {
+                                "sourceType": { "type": "string", "enum": ["variable", "literal"] },
+                                "source": { "type": "string" }
+                            },
+                            "required": ["sourceType", "source"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["collectionId", "templateId"], "additionalProperties": false
             }
         }),
         json!({
@@ -296,11 +355,19 @@ async fn call_tool(state: &McpState, params: Value) -> Result<Value, (i64, Strin
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
+    let _mutation_guard = match name {
+        "reqly_list_collections" | "reqly_list_script_templates" | "reqly_run_request" => None,
+        _ => Some(state.manager.workspace_mutations.lock().await),
+    };
     let result = match name {
         "reqly_list_collections" => list_collections(&state.app),
         "reqly_create_collection" => create_collection(&state.app, &arguments),
         "reqly_create_subgroup" => create_subgroup(&state.app, &arguments),
         "reqly_create_request" => create_request(&state.app, &arguments),
+        "reqly_list_script_templates" => list_script_templates(&state.app),
+        "reqly_create_script_template" => create_script_template(&state.app, &arguments),
+        "reqly_update_script_template" => update_script_template(&state.app, &arguments),
+        "reqly_bind_script_template" => bind_script_template(&state.app, &arguments),
         "reqly_run_request" => state.manager.run_request(&state.app, &arguments).await,
         _ => return Err((-32602, format!("Unknown tool: {name}"))),
     };
@@ -369,10 +436,193 @@ fn list_collections(app: &AppHandle) -> Result<Value, String> {
                     json!({ "id": group["id"], "name": group["name"], "requests": requests })
                 })
                 .collect::<Vec<_>>();
-            json!({ "id": collection["id"], "name": collection["name"], "requests": requests, "groups": groups })
+            json!({
+                "id": collection["id"], "name": collection["name"],
+                "preScriptTemplateId": collection["preScriptProfileId"],
+                "preScriptPlaceholders": collection["preScriptPlaceholders"],
+                "requests": requests, "groups": groups
+            })
         })
         .collect::<Vec<_>>();
     Ok(json!({ "collections": collections }))
+}
+
+fn list_script_templates(app: &AppHandle) -> Result<Value, String> {
+    let workspace = load_workspace(app)?;
+    let collections = workspace["collections"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let templates = workspace["preScriptProfiles"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|template| {
+            let template_id = template["id"].as_str().unwrap_or_default();
+            let referenced_by = collections
+                .iter()
+                .filter(|collection| collection["preScriptProfileId"].as_str() == Some(template_id))
+                .map(|collection| json!({ "id": collection["id"], "name": collection["name"] }))
+                .collect::<Vec<_>>();
+            json!({
+                "id": template["id"], "name": template["name"],
+                "script": template["script"], "referencedBy": referenced_by
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({ "templates": templates }))
+}
+
+fn create_script_template(app: &AppHandle, arguments: &Value) -> Result<Value, String> {
+    let name = required_string(arguments, "name")?;
+    let script = arguments
+        .get("script")
+        .and_then(Value::as_str)
+        .ok_or("script must be a string")?;
+    let mut workspace = load_workspace(app)?;
+    if !workspace["preScriptProfiles"].is_array() {
+        workspace["preScriptProfiles"] = json!([]);
+    }
+    let template = json!({ "id": Uuid::new_v4().to_string(), "name": name, "script": script });
+    workspace["preScriptProfiles"]
+        .as_array_mut()
+        .unwrap()
+        .push(template.clone());
+    save_workspace(app, &workspace)?;
+    Ok(json!({ "template": template }))
+}
+
+fn update_script_template(app: &AppHandle, arguments: &Value) -> Result<Value, String> {
+    let template_id = required_string(arguments, "templateId")?;
+    let name = arguments
+        .get("name")
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .ok_or("name must be a non-empty string")
+        })
+        .transpose()?;
+    let script = arguments
+        .get("script")
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .ok_or("script must be a string")
+        })
+        .transpose()?;
+    if name.is_none() && script.is_none() {
+        return Err("Provide name and/or script to update".into());
+    }
+    let mut workspace = load_workspace(app)?;
+    let template = workspace["preScriptProfiles"]
+        .as_array_mut()
+        .and_then(|templates| {
+            templates
+                .iter_mut()
+                .find(|template| template["id"].as_str() == Some(template_id.as_str()))
+        })
+        .ok_or_else(|| format!("Pre Script template not found: {template_id}"))?;
+    if let Some(name) = name {
+        template["name"] = Value::String(name);
+    }
+    if let Some(script) = script {
+        template["script"] = Value::String(script);
+    }
+    let updated = template.clone();
+    save_workspace(app, &workspace)?;
+    Ok(json!({ "template": updated }))
+}
+
+fn bind_script_template(app: &AppHandle, arguments: &Value) -> Result<Value, String> {
+    let collection_id = required_string(arguments, "collectionId")?;
+    let template_id = match arguments.get("templateId") {
+        Some(Value::Null) => String::new(),
+        Some(Value::String(value)) if !value.trim().is_empty() => value.trim().to_string(),
+        _ => return Err("templateId must be a template ID or null".into()),
+    };
+    let mut workspace = load_workspace(app)?;
+    if !template_id.is_empty()
+        && !workspace["preScriptProfiles"]
+            .as_array()
+            .is_some_and(|templates| {
+                templates
+                    .iter()
+                    .any(|template| template["id"].as_str() == Some(template_id.as_str()))
+            })
+    {
+        return Err(format!("Pre Script template not found: {template_id}"));
+    }
+    let placeholders = arguments
+        .get("placeholders")
+        .map(parse_script_placeholders)
+        .transpose()?;
+    let collection = workspace["collections"]
+        .as_array_mut()
+        .and_then(|collections| {
+            collections
+                .iter_mut()
+                .find(|collection| collection["id"].as_str() == Some(collection_id.as_str()))
+        })
+        .ok_or_else(|| format!("Top-level collection not found: {collection_id}"))?;
+    let binding_changed = collection["preScriptProfileId"].as_str() != Some(template_id.as_str());
+    collection["preScriptProfileId"] = Value::String(template_id);
+    if collection["preScriptProfileId"].as_str() == Some("") {
+        collection["preScriptPlaceholders"] = json!([]);
+    } else if let Some(placeholders) = placeholders {
+        collection["preScriptPlaceholders"] = Value::Array(placeholders);
+    } else if binding_changed {
+        collection["preScriptPlaceholders"] = json!([]);
+    }
+    let updated = collection.clone();
+    save_workspace(app, &workspace)?;
+    Ok(json!({ "collection": updated }))
+}
+
+fn parse_script_placeholders(value: &Value) -> Result<Vec<Value>, String> {
+    let placeholders = value.as_object().ok_or("placeholders must be an object")?;
+    let mut names = std::collections::HashSet::new();
+    placeholders
+        .iter()
+        .map(|(name, configuration)| {
+            let name = name.trim();
+            if name.is_empty() {
+                return Err("placeholder names must not be empty".into());
+            }
+            if !names.insert(name.to_string()) {
+                return Err(format!("Duplicate placeholder name: {name}"));
+            }
+            let source_type = required_string(configuration, "sourceType")?;
+            if source_type != "variable" && source_type != "literal" {
+                return Err(format!(
+                    "Unsupported sourceType for placeholder {name}: {source_type}"
+                ));
+            }
+            let source = configuration
+                .get("source")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("source must be a string for placeholder {name}"))?;
+            let source = if source_type == "variable" {
+                let source = source.trim();
+                if source.is_empty() {
+                    return Err(format!(
+                        "environment variable source must not be empty for placeholder {name}"
+                    ));
+                }
+                source
+            } else {
+                source
+            };
+            Ok(json!({
+                "id": Uuid::new_v4().to_string(), "name": name,
+                "sourceType": source_type, "source": source
+            }))
+        })
+        .collect()
 }
 
 fn create_collection(app: &AppHandle, arguments: &Value) -> Result<Value, String> {
@@ -443,11 +693,18 @@ fn create_request(app: &AppHandle, arguments: &Value) -> Result<Value, String> {
     } else {
         (value_as_body(arguments.get("body")), vec![empty_pair()])
     };
+    let post_script = match arguments.get("postScript") {
+        None => DEFAULT_POST_SCRIPT,
+        Some(Value::String(value)) => value,
+        Some(_) => return Err("postScript must be a string".into()),
+    };
     let request = json!({
         "id": Uuid::new_v4().to_string(), "name": name, "method": method, "url": url,
         "params": if params.is_empty() { vec![empty_pair()] } else { params },
         "headers": headers, "bodyType": body_type, "body": body, "formBody": form_body,
-        "formData": [empty_pair()], "postScript": DEFAULT_POST_SCRIPT, "batchData": "",
+        "formData": [empty_pair()],
+        "postScript": post_script,
+        "batchData": "",
         "pinned": false, "archived": false
     });
     let mut workspace = load_workspace(app)?;
