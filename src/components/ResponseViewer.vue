@@ -52,6 +52,11 @@ const parsedResponseJson = computed(() => {
     return { valid: false, value: null };
   }
 });
+const displayedResponseBody = computed(() => {
+  const body = props.response?.body;
+  if (typeof body !== "string" || parsedResponseJson.value.valid) return body;
+  return body.replace(/(?<!\\)\\u([0-9a-f]{4})/gi, (_match, code) => String.fromCharCode(Number.parseInt(code, 16)));
+});
 const responseContentType = computed(() => {
   const header = props.response?.headers?.find(([key]) => key.toLowerCase() === "content-type");
   return String(header?.[1] || "").toLowerCase();
@@ -153,9 +158,9 @@ function formatBytes(bytes) {
 
 async function copyResponse() {
   if (!props.response) return;
-  const content = typeof props.response.body === "string"
-    ? props.response.body
-    : stringifyObject(props.response.body, 2);
+  const content = typeof displayedResponseBody.value === "string"
+    ? displayedResponseBody.value
+    : stringifyObject(displayedResponseBody.value, 2);
   await navigator.clipboard.writeText(content);
   copied.value = true;
   window.setTimeout(() => (copied.value = false), 1200);
@@ -198,7 +203,7 @@ watch(
           <template v-else><span class="json-close-spacer"></span><span v-if="row.key !== null" class="json-key">{{ JSON.stringify(row.key) }}: </span><span :class="jsonValueClass(row.value)">{{ jsonValueText(row.value) }}</span><span>{{ row.last ? '' : ',' }}</span></template>
         </div>
       </div>
-      <ResponseCodeViewer v-else-if="activeTab === 'body'" :key="`${responseFormat}-${theme}`" :content="response.body" :language="responseFormat" :theme="theme" />
+      <ResponseCodeViewer v-else-if="activeTab === 'body'" :key="`${responseFormat}-${theme}`" :content="displayedResponseBody" :language="responseFormat" :theme="theme" />
       <div v-else-if="activeTab === 'request-headers'" class="response-headers"><div v-for="([key, value], index) in requestHeaders" :key="`${key}-${index}`"><strong>{{ key }}</strong><span>{{ value }}</span></div></div>
       <div v-else class="response-headers"><div v-for="([key, value], index) in response.headers" :key="`${key}-${index}`"><strong>{{ key }}</strong><span>{{ value }}</span></div></div>
     </template>

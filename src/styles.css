@@ -73,7 +73,7 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 .search-box input { width: 100%; border: 0; outline: 0; color: var(--text); background: transparent; font-size: 14px; }
 .collection-list { height: 0; flex: 1 1 0; min-height: 0; overflow-x: hidden; overflow-y: auto; }
 .collection { margin-bottom: 3px; }
-.collection-row { height: 32px; display: flex; align-items: center; padding-right: 3px; border: 1px solid #c9d2d7; border-radius: 4px; background: #d8e0e4; box-shadow: 0 1px 2px rgba(43, 55, 63, .06); transition: border-color .15s, background .15s, box-shadow .15s; }
+.collection-row { height: 32px; display: flex; align-items: center; padding-right: 3px; border: 1px solid #c9d2d7; border-radius: 4px; background: #d8e0e4; box-shadow: 0 1px 2px rgba(43, 55, 63, .06); cursor: pointer; transition: border-color .15s, background .15s, box-shadow .15s; }
 .collection-row:hover { border-color: #aebbc2; background: #d1dbe0; box-shadow: 0 1px 3px rgba(43, 55, 63, .1); }
 .collection.has-selected-request > .collection-row { border-color: color-mix(in srgb, var(--accent) 45%, #c9d2d7); background: color-mix(in srgb, var(--accent) 8%, #d8e0e4); box-shadow: inset 3px 0 var(--accent), 0 1px 2px rgba(43, 55, 63, .06); }
 .collection.has-selected-request > .collection-row .collection-name { color: #26323a; }
@@ -87,7 +87,7 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 .row-action.danger:hover, .request-action.danger:hover { color: var(--red); }
 .request-list { display: flex; flex-direction: column; gap: 3px; margin: 3px 0 3px 14px; padding: 0 0 0 10px; border-left: 1px solid #c8d1d6; }
 .subcollection { margin: 0; }
-.subcollection-row { height: 32px; display: flex; align-items: center; padding-right: 3px; border: 1px solid #d5dde1; border-radius: 4px; color: #59666f; background: #eef1f3; transition: border-color .15s, background .15s; }
+.subcollection-row { height: 32px; display: flex; align-items: center; padding-right: 3px; border: 1px solid #d5dde1; border-radius: 4px; color: #59666f; background: #eef1f3; cursor: pointer; transition: border-color .15s, background .15s; }
 .subcollection-row:hover { border-color: #bbc6cc; background: #e6ebed; }
 .subcollection.active > .subcollection-row { border-color: color-mix(in srgb, var(--accent) 40%, #d5dde1); box-shadow: inset 2px 0 var(--accent); color: var(--text); }
 .subcollection-row .folder-icon { margin-right: 7px; }

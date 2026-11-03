@@ -13,6 +13,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  ChevronsUp,
   ClipboardPaste,
   Code2,
   Copy,
@@ -100,7 +101,8 @@ const activeTab = ref("params");
 const responseTab = ref("body");
 const response = ref(null);
 const responseFullscreen = ref(false);
-const sending = ref(false);
+const sendingRequestIds = reactive(new Set());
+const sending = computed(() => sendingRequestIds.has(workspace.selectedRequestId));
 const saveState = ref("saved");
 const settingsOpen = ref(false);
 const mcpRuntime = reactive({ running: false, port: null, applying: false, error: "" });
@@ -310,6 +312,38 @@ async function toggleSubgroup(group) {
   group.expanded = !group.expanded;
   if (group.expanded) await loadGroupRequests(group);
   else await unloadGroupRequests(group);
+}
+
+function toggleCollectionFromRow(event, collection) {
+  if (event.target.closest(".collapse-button, .row-action, input")) return;
+  toggleCollection(collection);
+}
+
+function toggleSubgroupFromRow(event, group) {
+  if (event.target.closest(".collapse-button, .row-action, input")) return;
+  toggleSubgroup(group);
+}
+
+async function collapseAllCollections() {
+  searchText.value = "";
+  if (isTauri()) await persist();
+  suppressWorkspaceSave += 1;
+  try {
+    for (const collection of workspace.collections) {
+      collection.expanded = false;
+      for (const group of collection.groups || []) group.expanded = false;
+      if (!isTauri()) continue;
+      for (const group of requestContainers(collection)) {
+        if (!group.requestsLoaded || selectedRequestGroup.value?.id === group.id) continue;
+        group.requests = [];
+        group.requestsLoaded = false;
+      }
+    }
+    await nextTick();
+  } finally {
+    suppressWorkspaceSave = Math.max(0, suppressWorkspaceSave - 1);
+  }
+  await persist();
 }
 
 function requestSummary(request) {
@@ -1976,17 +2010,23 @@ function showNotice(message) {
 }
 
 async function sendRequest() {
-  if (!selectedRequest.value || sending.value) return;
-  sending.value = true;
+  if (!selectedRequest.value) return;
+  const requestId = selectedRequest.value.id;
+  if (sendingRequestIds.has(requestId)) return;
+  const source = cloneData(selectedRequest.value);
+  const group = selectedRequestGroup.value;
+  sendingRequestIds.add(requestId);
   errorMessage.value = "";
   response.value = null;
   try {
-    response.value = await executeRequestLifecycle(selectedRequest.value, selectedRequestGroup.value);
+    const result = await executeRequestLifecycle(source, group);
+    setRequestExecutionResult(requestId, result, "");
   } catch (error) {
-    errorMessage.value = formatError(error);
-    appendConsole({ phase: "request", level: "error", args: [errorMessage.value] });
+    const message = formatError(error);
+    setRequestExecutionResult(requestId, null, message);
+    appendConsole({ requestName: source.name, phase: "request", level: "error", args: [message] });
   } finally {
-    sending.value = false;
+    sendingRequestIds.delete(requestId);
   }
 }
 
@@ -2432,6 +2472,7 @@ onBeforeUnmount(() => {
         <div class="sidebar-heading">
           <div class="sidebar-heading-title"><span class="eyebrow">WORKSPACE</span><strong>接口集合</strong></div>
           <div class="sidebar-heading-actions">
+            <button class="icon-button" title="折叠全部" @click="collapseAllCollections"><ChevronsUp :size="17" /></button>
             <button class="icon-button sidebar-import-button" :disabled="importingArtifact" :title="importingArtifact ? importProgress.label : '导入'" @click="openArtifactImport"><FileInput :size="17" /></button>
             <button class="icon-button" title="新建集合" @click="addCollection"><FolderPlus :size="17" /></button>
           </div>
@@ -2452,7 +2493,7 @@ onBeforeUnmount(() => {
         <label class="search-box"><Search :size="15" /><input v-model="searchText" placeholder="搜索请求" /></label>
         <div class="collection-list">
           <section v-for="collection in filteredCollections" :key="collection.id" class="collection" :class="{ 'has-selected-request': collectionRequests(collection).some((request) => request.id === workspace.selectedRequestId) }">
-            <div class="collection-row">
+            <div class="collection-row" @click="toggleCollectionFromRow($event, collection)">
               <button class="collapse-button" @click="toggleCollection(collection)">
                 <ChevronDown v-if="collection.expanded" :size="15" /><ChevronRight v-else :size="15" />
               </button>
@@ -2465,7 +2506,7 @@ onBeforeUnmount(() => {
                 @blur="finishRenameCollection(collection)"
                 @keydown.enter.prevent="$event.currentTarget.blur()"
               />
-              <button v-else class="collection-name" @dblclick="beginRenameCollection(collection)">{{ collection.name }}</button>
+              <span v-else class="collection-name">{{ collection.name }}</span>
               <span class="count">{{ collectionRequestCount(collection) }}</span>
               <button class="row-action" title="重命名集合" @click="beginRenameCollection(collection)"><Pencil :size="13" /></button>
               <button class="row-action" title="集合脚本" @click="openCollectionScript(collection)"><Code2 :size="14" /></button>
@@ -2521,7 +2562,7 @@ onBeforeUnmount(() => {
                 </div>
               </div>
               <section v-for="group in collection.groups" :key="group.id" class="subcollection" :class="{ active: group.requests.some((request) => request.id === workspace.selectedRequestId) }">
-                <div class="subcollection-row">
+                <div class="subcollection-row" @click="toggleSubgroupFromRow($event, group)">
                   <button class="collapse-button" @click="toggleSubgroup(group)"><ChevronDown v-if="group.expanded" :size="15" /><ChevronRight v-else :size="15" /></button>
                   <Folder :size="16" class="folder-icon" />
                   <input
@@ -2532,7 +2573,7 @@ onBeforeUnmount(() => {
                     @blur="finishRenameCollection(group)"
                     @keydown.enter.prevent="$event.currentTarget.blur()"
                   />
-                  <button v-else class="collection-name" @dblclick="beginRenameCollection(group)">{{ group.name }}</button>
+                  <span v-else class="collection-name">{{ group.name }}</span>
                   <span class="count">{{ group.requestCount || group.requests.length }}</span>
                   <button class="row-action" title="重命名分组" @click="beginRenameCollection(group)"><Pencil :size="12" /></button>
                   <button class="row-action" title="添加请求" @click="addRequest(group)"><Plus :size="14" /></button>
