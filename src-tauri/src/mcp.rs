@@ -344,6 +344,34 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "reqly_update_request",
+            "description": "Update selected fields of a saved Reqly request. Fields not provided remain unchanged.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "requestId": { "type": "string" },
+                    "name": { "type": "string", "minLength": 1, "pattern": "\\S" },
+                    "method": { "type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+                    "url": { "type": "string", "minLength": 1, "pattern": "\\S" },
+                    "params": { "type": "object", "additionalProperties": { "type": ["string", "number", "boolean", "null"] } },
+                    "headers": { "type": "object", "additionalProperties": { "type": ["string", "number", "boolean", "null"] } },
+                    "bodyType": { "type": "string", "enum": ["none", "json", "text", "form"] },
+                    "body": { "description": "Raw JSON/text body, or an object for form body" },
+                    "postScript": { "type": "string" },
+                    "pinned": { "type": "boolean" },
+                    "archived": { "type": "boolean" }
+                },
+                "required": ["requestId"],
+                "anyOf": [
+                    { "required": ["name"] }, { "required": ["method"] }, { "required": ["url"] },
+                    { "required": ["params"] }, { "required": ["headers"] }, { "required": ["bodyType"] },
+                    { "required": ["body"] }, { "required": ["postScript"] }, { "required": ["pinned"] },
+                    { "required": ["archived"] }
+                ],
+                "additionalProperties": false
+            }
+        }),
+        json!({
             "name": "reqly_run_request",
             "description": "Run a saved Reqly request through the same execution pipeline as the Reqly UI, including workspace variables and Pre-request/Post-response scripts. Optional variables override workspace values for this run.",
             "inputSchema": {
@@ -378,6 +406,7 @@ async fn call_tool(state: &McpState, params: Value) -> Result<Value, (i64, Strin
         "reqly_update_script_template" => update_script_template(&state.app, &arguments),
         "reqly_bind_script_template" => bind_script_template(&state.app, &arguments),
         "reqly_delete_request" => delete_request(&state.app, &arguments),
+        "reqly_update_request" => update_request(&state.app, &arguments),
         "reqly_run_request" => state.manager.run_request(&state.app, &arguments).await,
         _ => return Err((-32602, format!("Unknown tool: {name}"))),
     };
@@ -715,6 +744,7 @@ fn create_request(app: &AppHandle, arguments: &Value) -> Result<Value, String> {
         "formData": [empty_pair()],
         "postScript": post_script,
         "batchData": "",
+        "batchPlaceholderNames": [],
         "pinned": false, "archived": false
     });
     let mut workspace = load_workspace(app)?;
@@ -746,6 +776,94 @@ fn create_request(app: &AppHandle, arguments: &Value) -> Result<Value, String> {
         .push(request.clone());
     save_workspace(app, &workspace)?;
     Ok(json!({ "request": request }))
+}
+
+fn update_request(app: &AppHandle, arguments: &Value) -> Result<Value, String> {
+    let request_id = required_string(arguments, "requestId")?;
+    let mut request = storage::get_request(app, &request_id)?
+        .ok_or_else(|| format!("Request not found: {request_id}"))?;
+
+    if let Some(value) = arguments.get("name") {
+        let name = value
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or("name must be a non-empty string")?;
+        request["name"] = Value::String(name.to_string());
+    }
+    if let Some(value) = arguments.get("method") {
+        let method = value
+            .as_str()
+            .ok_or("method must be a string")?
+            .to_uppercase();
+        if !["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"].contains(&method.as_str())
+        {
+            return Err(format!("Unsupported HTTP method: {method}"));
+        }
+        request["method"] = Value::String(method);
+    }
+    if let Some(value) = arguments.get("url") {
+        let url = value
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or("url must be a non-empty string")?;
+        request["url"] = Value::String(url.to_string());
+    }
+    if let Some(value) = arguments.get("params") {
+        if !value.is_object() {
+            return Err("params must be an object".into());
+        }
+        request["params"] = Value::Array(pairs_from_object(Some(value)));
+    }
+    if let Some(value) = arguments.get("headers") {
+        if !value.is_object() {
+            return Err("headers must be an object".into());
+        }
+        request["headers"] = Value::Array(pairs_from_object(Some(value)));
+    }
+    if let Some(value) = arguments.get("bodyType") {
+        let body_type = value.as_str().ok_or("bodyType must be a string")?;
+        if !["none", "json", "text", "form"].contains(&body_type) {
+            return Err(format!("Unsupported bodyType: {body_type}"));
+        }
+        request["bodyType"] = Value::String(body_type.to_string());
+    }
+    if let Some(value) = arguments.get("body") {
+        if request["bodyType"].as_str() == Some("form") {
+            if !value.is_object() {
+                return Err("body must be an object when bodyType is form".into());
+            }
+            request["body"] = Value::String(String::new());
+            request["formBody"] = Value::Array(pairs_from_object(Some(value)));
+        } else {
+            request["body"] = Value::String(value_as_body(Some(value)));
+        }
+    }
+    if let Some(value) = arguments.get("postScript") {
+        request["postScript"] = Value::String(
+            value
+                .as_str()
+                .ok_or("postScript must be a string")?
+                .to_string(),
+        );
+    }
+    for field in ["pinned", "archived"] {
+        if let Some(value) = arguments.get(field) {
+            request[field] = Value::Bool(
+                value
+                    .as_bool()
+                    .ok_or_else(|| format!("{field} must be a boolean"))?,
+            );
+        }
+    }
+
+    storage::save_request(app, &request)?;
+    let mut result = json!({ "request": request });
+    if let Err(error) = app.emit("request-detail-updated", result["request"].clone()) {
+        result["syncWarning"] = Value::String(error.to_string());
+    }
+    Ok(result)
 }
 
 fn delete_request(app: &AppHandle, arguments: &Value) -> Result<Value, String> {

@@ -58,6 +58,7 @@ const mcpTools = [
   { name: "reqly_create_collection", description: "创建一级集合" },
   { name: "reqly_create_subgroup", description: "创建二级分组" },
   { name: "reqly_create_request", description: "创建请求及 Post Script" },
+  { name: "reqly_update_request", description: "修改已保存的请求" },
   { name: "reqly_delete_request", description: "永久删除请求" },
   { name: "reqly_list_script_templates", description: "列出 Pre Script 模板" },
   { name: "reqly_create_script_template", description: "创建 Pre Script 模板" },
@@ -78,6 +79,7 @@ const makeRequest = (name = "新请求", url = "") => ({
   formData: [pair()],
   postScript: defaultPostScript,
   batchData: "",
+  batchPlaceholderNames: [],
   pinned: false,
 });
 
@@ -172,6 +174,7 @@ let noticeTimer;
 let importProgressTimer;
 const requestSaveTimers = new Map();
 let stopWorkspaceListener;
+let stopRequestDetailListener;
 let stopMcpRequestListener;
 let stopArtifactProgressListener;
 let mcpRequestQueue = Promise.resolve();
@@ -371,6 +374,7 @@ function normalizeRequest(request, inheritedPostScript = defaultPostScript) {
   request.formData ||= [pair()];
   request.postScript ??= inheritedPostScript || defaultPostScript;
   request.batchData ??= "";
+  request.batchPlaceholderNames ??= [];
   return request;
 }
 
@@ -2144,10 +2148,25 @@ function requestPlaceholders(request) {
 }
 
 function suggestedBatchData(placeholders) {
-  if (placeholders.length === 1) return JSON.stringify([1, 2], null, 2);
   return JSON.stringify([
     Object.fromEntries(placeholders.map((name) => [name, ""])),
   ], null, 2);
+}
+
+function batchTemplateChanged(request, placeholders) {
+  const previous = request.batchPlaceholderNames || [];
+  if (previous.length && (previous.length !== placeholders.length || previous.some((name, index) => name !== placeholders[index]))) return true;
+  if (!request.batchData.trim() || request.batchData === legacyBatchData) return true;
+  try {
+    const rows = JSON.parse(request.batchData);
+    if (!Array.isArray(rows) || !rows.length) return true;
+    if (!previous.length && rows.length === 2 && rows[0] === 1 && rows[1] === 2) return true;
+    if (placeholders.length > 1 && rows.some((item) => !item || Array.isArray(item) || typeof item !== "object")) return true;
+    return rows.some((item) => item && !Array.isArray(item) && typeof item === "object"
+      && placeholders.some((name) => !batchValue(item, name).found));
+  } catch {
+    return false;
+  }
 }
 
 function batchValue(source, name) {
@@ -2212,9 +2231,10 @@ function openBatchRunner() {
     return;
   }
   batchPlaceholders.value = placeholders;
-  if (!selectedRequest.value.batchData.trim() || selectedRequest.value.batchData === legacyBatchData) {
+  if (batchTemplateChanged(selectedRequest.value, placeholders)) {
     selectedRequest.value.batchData = suggestedBatchData(placeholders);
   }
+  selectedRequest.value.batchPlaceholderNames = [...placeholders];
   batchError.value = "";
   batchOpen.value = true;
 }
@@ -2444,6 +2464,12 @@ onMounted(async () => {
         }
         showNotice("已同步 MCP 工作区变更");
       });
+      stopRequestDetailListener = await listen("request-detail-updated", (event) => {
+        const request = cacheRequestDetail(normalizeRequest(cloneData(event.payload)));
+        const location = findRequestLocation(request.id);
+        if (location) Object.assign(location.request, requestSummary(request));
+        showNotice(`已同步 MCP 接口变更：${request.name}`);
+      });
     }
     let saved = isTauri()
       ? await invoke("load_workspace")
@@ -2497,6 +2523,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   stopWorkspaceListener?.();
+  stopRequestDetailListener?.();
   stopMcpRequestListener?.();
   stopArtifactProgressListener?.();
   window.removeEventListener("keydown", handleKeydown);
@@ -3035,6 +3062,7 @@ onBeforeUnmount(() => {
               <label class="switch" @click.stop><input v-model="workspace.mcp.enabled" type="checkbox" :disabled="mcpRuntime.applying" @change="applyMcpConfig" /><span></span></label>
             </div>
             <template v-if="!collapsedSettings.mcp">
+            <label class="field mcp-port-field"><span>监听端口</span><input v-model.number="workspace.mcp.port" type="number" min="1024" max="65535" step="1" :disabled="mcpRuntime.applying" @change="workspace.mcp.enabled && applyMcpConfig()" /></label>
             <div class="mcp-status-row" :class="{ running: mcpRuntime.running, error: mcpRuntime.error }">
               <span class="mcp-status-dot"></span>
               <strong>{{ mcpRuntime.applying ? '正在应用' : mcpRuntime.running ? '运行中' : '已关闭' }}</strong>
@@ -3047,7 +3075,6 @@ onBeforeUnmount(() => {
                 <button :title="copiedMcpAddress === address ? '已复制' : '复制地址'" @click="copyMcpAddress(address)"><Check v-if="copiedMcpAddress === address" :size="14" /><Copy v-else :size="14" /></button>
               </div>
             </div>
-            <label class="field"><span>监听端口</span><input v-model.number="workspace.mcp.port" type="number" min="1024" max="65535" step="1" :disabled="mcpRuntime.applying" @change="workspace.mcp.enabled && applyMcpConfig()" /></label>
             <div class="mcp-tools">
               <div class="mcp-tools-heading"><strong>支持的方法</strong><span>{{ mcpTools.length }}</span></div>
               <div class="mcp-tool-list">
