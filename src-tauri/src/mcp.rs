@@ -335,6 +335,15 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "reqly_delete_request",
+            "description": "Delete a saved Reqly request by its ID. The request will be permanently removed from its collection or subgroup.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "requestId": { "type": "string" } },
+                "required": ["requestId"], "additionalProperties": false
+            }
+        }),
+        json!({
             "name": "reqly_run_request",
             "description": "Run a saved Reqly request through the same execution pipeline as the Reqly UI, including workspace variables and Pre-request/Post-response scripts. Optional variables override workspace values for this run.",
             "inputSchema": {
@@ -368,6 +377,7 @@ async fn call_tool(state: &McpState, params: Value) -> Result<Value, (i64, Strin
         "reqly_create_script_template" => create_script_template(&state.app, &arguments),
         "reqly_update_script_template" => update_script_template(&state.app, &arguments),
         "reqly_bind_script_template" => bind_script_template(&state.app, &arguments),
+        "reqly_delete_request" => delete_request(&state.app, &arguments),
         "reqly_run_request" => state.manager.run_request(&state.app, &arguments).await,
         _ => return Err((-32602, format!("Unknown tool: {name}"))),
     };
@@ -736,6 +746,24 @@ fn create_request(app: &AppHandle, arguments: &Value) -> Result<Value, String> {
         .push(request.clone());
     save_workspace(app, &workspace)?;
     Ok(json!({ "request": request }))
+}
+
+fn delete_request(app: &AppHandle, arguments: &Value) -> Result<Value, String> {
+    let request_id = required_string(arguments, "requestId")?;
+    let mut deleted = storage::delete_request(app, &request_id)?
+        .ok_or_else(|| format!("Request not found: {request_id}"))?;
+    let sync_warning = match storage::load_workspace_index(app) {
+        Ok(Some(index)) => app
+            .emit("workspace-updated", index)
+            .err()
+            .map(|error| error.to_string()),
+        Ok(None) => Some("workspace index was not saved".to_string()),
+        Err(error) => Some(error),
+    };
+    if let Some(warning) = sync_warning {
+        deleted["syncWarning"] = Value::String(warning);
+    }
+    Ok(deleted)
 }
 
 fn required_string(arguments: &Value, key: &str) -> Result<String, String> {

@@ -53,6 +53,18 @@ const defaultPreScriptTemplate = "// 使用无引号占位符，分组可将其�
 const defaultPostScript = "// 收到响应后运行\n// if (pm.response.code === 401) { /* 刷新凭证 */ }";
 const legacyBatchData = "[\n  {\n    \"id\": 1\n  },\n  {\n    \"id\": 2\n  }\n]";
 const themeColors = ["#d65f35", "#3276c3", "#27805f", "#7654b5", "#b94b68"];
+const mcpTools = [
+  { name: "reqly_list_collections", description: "列出集合、子分组和请求" },
+  { name: "reqly_create_collection", description: "创建一级集合" },
+  { name: "reqly_create_subgroup", description: "创建二级分组" },
+  { name: "reqly_create_request", description: "创建请求及 Post Script" },
+  { name: "reqly_delete_request", description: "永久删除请求" },
+  { name: "reqly_list_script_templates", description: "列出 Pre Script 模板" },
+  { name: "reqly_create_script_template", description: "创建 Pre Script 模板" },
+  { name: "reqly_update_script_template", description: "更新 Pre Script 模板" },
+  { name: "reqly_bind_script_template", description: "绑定模板和占位符" },
+  { name: "reqly_run_request", description: "运行已保存的请求" },
+];
 const makeRequest = (name = "新请求", url = "") => ({
   id: uid(),
   name,
@@ -127,10 +139,8 @@ const placeholderVariableMenuPosition = reactive({ top: 0, left: 0, width: 0 });
 const scriptLogs = ref([]);
 const consoleOpen = ref(false);
 const consoleUnread = ref(0);
-const environmentCreateMode = ref("variable");
 const variableDraftKey = ref("");
 const variableDraftValue = ref("");
-const namespaceDraft = ref("");
 const collapsedNamespaces = reactive({});
 const collapsedSettings = reactive({ theme: true, accent: true, mcp: true, proxy: true, variables: false });
 const confirmDialog = reactive({
@@ -163,6 +173,7 @@ let mcpRequestQueue = Promise.resolve();
 let requestSelectionVersion = 0;
 let requestSearchTimer;
 let suppressWorkspaceSave = 0;
+let workspaceSyncVersion = 0;
 
 function appendConsole(entry) {
   scriptLogs.value.push({
@@ -255,7 +266,7 @@ async function loadGroupRequests(group) {
   try {
     await load;
   } finally {
-    requestGroupLoadPromises.delete(group.id);
+    if (requestGroupLoadPromises.get(group.id) === load) requestGroupLoadPromises.delete(group.id);
     loadingRequestGroups.delete(group.id);
   }
 }
@@ -1706,14 +1717,6 @@ function addDirectVariable() {
   variableDraftValue.value = "";
 }
 
-function addNamespace() {
-  const namespace = namespaceDraft.value.trim();
-  const segments = namespace.split(".");
-  if (!namespace || segments.length > 2 || segments.some((segment) => !segment)) return;
-  addVariableAt(namespace);
-  namespaceDraft.value = "";
-}
-
 function toggleNamespace(path) {
   collapsedNamespaces[path] = !collapsedNamespaces[path];
 }
@@ -2303,22 +2306,33 @@ onMounted(async () => {
   try {
     if (isTauri()) {
       stopWorkspaceListener = await listen("workspace-updated", async (event) => {
+        const syncVersion = ++workspaceSyncVersion;
+        const selectionVersion = requestSelectionVersion;
         const saved = event.payload;
         if (!saved?.collections || !saved?.variables || !saved?.proxy) return;
         clearTimeout(saveTimer);
-        const selectedId = workspace.selectedRequestId || saved.selectedRequestId;
+        const preferredSelectedId = workspace.selectedRequestId || saved.selectedRequestId;
         const loadedGroupIds = workspace.collections
           .flatMap(requestContainers)
           .filter((group) => group.requestsLoaded)
           .map((group) => group.id);
         suppressWorkspaceSave += 1;
         try {
+          requestGroupLoadPromises.clear();
           Object.assign(workspace, normalizeWorkspace(cloneData(saved)));
           for (const groupId of loadedGroupIds) {
             const location = findRequestGroupById(groupId);
             if (location) await loadGroupRequests(location.group);
           }
-          await ensureRequestVisible(selectedId);
+          if (syncVersion !== workspaceSyncVersion) return;
+          if (selectionVersion !== requestSelectionVersion) return;
+          let selectedId = preferredSelectedId;
+          if (!await ensureRequestVisible(selectedId)) {
+            selectedId = saved.selectedRequestId || "";
+            await ensureRequestVisible(selectedId);
+          }
+          if (syncVersion !== workspaceSyncVersion) return;
+          await loadRequestDetail(selectedId);
           workspace.selectedRequestId = selectedId;
           await nextTick();
         } finally {
@@ -2918,6 +2932,12 @@ onBeforeUnmount(() => {
               </div>
             </div>
             <label class="field"><span>监听端口</span><input v-model.number="workspace.mcp.port" type="number" min="1024" max="65535" step="1" :disabled="mcpRuntime.applying" @change="workspace.mcp.enabled && applyMcpConfig()" /></label>
+            <div class="mcp-tools">
+              <div class="mcp-tools-heading"><strong>支持的方法</strong><span>{{ mcpTools.length }}</span></div>
+              <div class="mcp-tool-list">
+                <div v-for="tool in mcpTools" :key="tool.name" class="mcp-tool-row"><code>{{ tool.name }}</code><span>{{ tool.description }}</span></div>
+              </div>
+            </div>
             <div v-if="mcpRuntime.error" class="mcp-setting-error">{{ mcpRuntime.error }}</div>
             </template>
           </div>
@@ -2974,18 +2994,11 @@ onBeforeUnmount(() => {
               </section>
 
               <div class="environment-create">
-                <div class="segmented compact-segmented environment-create-mode">
-                  <button :class="{ active: environmentCreateMode === 'variable' }" @click="environmentCreateMode = 'variable'">直接赋值</button>
-                  <button :class="{ active: environmentCreateMode === 'namespace' }" @click="environmentCreateMode = 'namespace'">命名空间</button>
-                </div>
-                <div v-if="environmentCreateMode === 'variable'" class="environment-create-fields direct-variable-fields">
-                  <input v-model="variableDraftKey" :class="{ invalid: variableDraftKey.trim() && !validVariableKey(variableDraftKey.trim()) }" placeholder="变量名，如 token" @keydown.enter="addDirectVariable" />
+                <div class="environment-create-hint">变量名支持命名空间，例如 <code>token</code>、<code>dev.token</code>、<code>dev.wms.token</code></div>
+                <div class="environment-create-fields direct-variable-fields">
+                  <input v-model="variableDraftKey" :class="{ invalid: variableDraftKey.trim() && !validVariableKey(variableDraftKey.trim()) }" placeholder="变量名" @keydown.enter="addDirectVariable" />
                   <input v-model="variableDraftValue" placeholder="值" @keydown.enter="addDirectVariable" />
                   <button :disabled="!variableDraftKey.trim() || !validVariableKey(variableDraftKey.trim())" @click="addDirectVariable"><Plus :size="14" />添加变量</button>
-                </div>
-                <div v-else class="environment-create-fields namespace-fields">
-                  <input v-model="namespaceDraft" placeholder="新命名空间，如 dev 或 dev.wms" @keydown.enter="addNamespace" />
-                  <button :disabled="!namespaceDraft.trim()" @click="addNamespace"><FolderPlus :size="14" />添加命名空间</button>
                 </div>
               </div>
             </div>

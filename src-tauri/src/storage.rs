@@ -1,6 +1,6 @@
 use std::{collections::HashSet, fs, path::PathBuf};
 
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::{Value, json};
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
@@ -32,6 +32,7 @@ fn open(app: &AppHandle) -> Result<Connection, String> {
          CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS workspace_state (id INTEGER PRIMARY KEY CHECK (id = 1), data TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS request_details (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+         CREATE TABLE IF NOT EXISTS deleted_requests (id TEXT PRIMARY KEY);
          CREATE TABLE IF NOT EXISTS request_index (
            id TEXT PRIMARY KEY,
            container_id TEXT NOT NULL,
@@ -215,6 +216,16 @@ pub(crate) fn save_request(app: &AppHandle, request: &Value) -> Result<(), Strin
     let transaction = connection
         .transaction()
         .map_err(|error| error.to_string())?;
+    let deleted = transaction
+        .query_row("SELECT 1 FROM deleted_requests WHERE id=?1", [id], |_| {
+            Ok(())
+        })
+        .optional()
+        .map_err(|error| error.to_string())?
+        .is_some();
+    if deleted {
+        return Err(format!("request has been deleted: {id}"));
+    }
     transaction.execute(
         "INSERT INTO request_details(id, data) VALUES(?1, ?2) ON CONFLICT(id) DO UPDATE SET data = excluded.data",
         params![id, serde_json::to_string(request).map_err(|error| error.to_string())?],
@@ -233,6 +244,80 @@ pub(crate) fn save_request(app: &AppHandle, request: &Value) -> Result<(), Strin
         )
         .map_err(|error| error.to_string())?;
     transaction.commit().map_err(|error| error.to_string())
+}
+
+pub(crate) fn delete_request(app: &AppHandle, request_id: &str) -> Result<Option<Value>, String> {
+    let mut connection = open(app)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| error.to_string())?;
+    let located = transaction
+        .query_row(
+            "SELECT container_id, name FROM request_index WHERE id=?1",
+            [request_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let Some((container_id, request_name)) = located else {
+        return Ok(None);
+    };
+
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO deleted_requests(id) VALUES(?1)",
+            [request_id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute("DELETE FROM request_search WHERE id=?1", [request_id])
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute("DELETE FROM request_index WHERE id=?1", [request_id])
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute("DELETE FROM request_details WHERE id=?1", [request_id])
+        .map_err(|error| error.to_string())?;
+
+    let data = transaction
+        .query_row("SELECT data FROM workspace_state WHERE id=1", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|error| error.to_string())?;
+    let mut workspace: Value = serde_json::from_str(&data).map_err(|error| error.to_string())?;
+    if let Some(container) = find_container_mut(&mut workspace, &container_id) {
+        let count: i64 = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM request_index WHERE container_id=?1",
+                [&container_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        container["requestCount"] = Value::from(count);
+        container["requests"] = json!([]);
+        container["requestsLoaded"] = Value::Bool(false);
+    }
+    if workspace["selectedRequestId"].as_str() == Some(request_id) {
+        let next_id = transaction
+            .query_row(
+                "SELECT id FROM request_index
+                 ORDER BY archived ASC, CASE WHEN container_id=?1 THEN 0 ELSE 1 END,
+                 pinned DESC, position LIMIT 1",
+                [&container_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?
+            .unwrap_or_default();
+        workspace["selectedRequestId"] = Value::String(next_id);
+    }
+    write_state(&transaction, &workspace)?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(Some(json!({
+        "deletedRequestId": request_id,
+        "requestName": request_name,
+        "containerId": container_id
+    })))
 }
 
 pub(crate) fn save_workspace(app: &AppHandle, workspace: &Value) -> Result<(), String> {
@@ -567,6 +652,29 @@ fn save_with_connection(connection: &mut Connection, workspace: &Value) -> Resul
             [],
         )
         .map_err(|error| error.to_string())?;
+    let selected_id = index["selectedRequestId"].as_str().unwrap_or_default();
+    let selected_exists = !selected_id.is_empty()
+        && transaction
+            .query_row(
+                "SELECT 1 FROM request_index WHERE id=?1",
+                [selected_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?
+            .is_some();
+    if !selected_id.is_empty() && !selected_exists {
+        let next_id = transaction
+            .query_row(
+                "SELECT id FROM request_index ORDER BY archived ASC, container_id, pinned DESC, position LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?
+            .unwrap_or_default();
+        index["selectedRequestId"] = Value::String(next_id);
+    }
     write_state(&transaction, &index)?;
     transaction.commit().map_err(|error| error.to_string())
 }
@@ -611,6 +719,16 @@ fn sync_container(
         .map_err(|error| error.to_string())?;
     for (position, request) in requests.into_iter().enumerate() {
         let id = request["id"].as_str().ok_or("request id is required")?;
+        let deleted = transaction
+            .query_row("SELECT 1 FROM deleted_requests WHERE id=?1", [id], |_| {
+                Ok(())
+            })
+            .optional()
+            .map_err(|error| error.to_string())?
+            .is_some();
+        if deleted {
+            continue;
+        }
         transaction.execute(
             "INSERT INTO request_index(id, container_id, position, name, method, url, archived, pinned)
              VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
@@ -715,6 +833,7 @@ mod tests {
         let mut connection = Connection::open_in_memory().unwrap();
         connection.execute_batch(
             "CREATE TABLE request_details(id TEXT PRIMARY KEY, data TEXT NOT NULL);
+             CREATE TABLE deleted_requests(id TEXT PRIMARY KEY);
              CREATE TABLE request_index(id TEXT PRIMARY KEY, container_id TEXT NOT NULL, position INTEGER NOT NULL,
              name TEXT NOT NULL, method TEXT NOT NULL, url TEXT NOT NULL, archived INTEGER NOT NULL, pinned INTEGER NOT NULL);
              CREATE VIRTUAL TABLE request_search USING fts5(id UNINDEXED, name, url, tokenize='trigram');"

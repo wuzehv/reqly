@@ -44,6 +44,7 @@ Available tools:
 - `reqly_create_collection`: create a collection
 - `reqly_create_subgroup`: create a second-level group that inherits its parent collection Pre-request script
 - `reqly_create_request`: create a request in a collection or subgroup with Query parameters, headers, JSON/Text/Form body, and an optional Post-response script
+- `reqly_delete_request`: delete a saved request by its ID
 - `reqly_list_script_templates`: list reusable Pre Script templates and their collection references
 - `reqly_create_script_template`: create a reusable Pre Script template
 - `reqly_update_script_template`: update a Pre Script template name or JavaScript
