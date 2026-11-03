@@ -8,8 +8,6 @@ import {
   AlertTriangle,
   Archive,
   ArchiveRestore,
-  ArrowDown,
-  ArrowUp,
   Check,
   ChevronDown,
   ChevronRight,
@@ -22,6 +20,7 @@ import {
   FileInput,
   Folder,
   FolderPlus,
+  GripVertical,
   Moon,
   Network,
   Pencil,
@@ -131,6 +130,8 @@ const batchResponseTab = ref("body");
 const batchResponseFullscreen = ref(false);
 const batchProgress = reactive({ current: 0, total: 0 });
 const editingCollectionId = ref("");
+const draggedRequest = ref(null);
+const requestDropTarget = reactive({ id: "", position: "" });
 const scriptCollectionId = ref("");
 const scriptTemplateManagerOpen = ref(false);
 const selectedPreScriptProfileId = ref("");
@@ -143,6 +144,8 @@ const consoleOpen = ref(false);
 const consoleUnread = ref(0);
 const variableDraftKey = ref("");
 const variableDraftValue = ref("");
+const subNamespaceParent = ref("");
+const subNamespaceDraft = ref("");
 const collapsedNamespaces = reactive({});
 const collapsedSettings = reactive({ theme: true, accent: true, mcp: true, proxy: true, variables: false });
 const confirmDialog = reactive({
@@ -890,23 +893,64 @@ async function removeRequest(group, request) {
   requestDetails.delete(request.id);
 }
 
-function moveRequest(group, request, direction) {
+function startRequestDrag(event, group, request) {
+  if (event.button !== 0 || request.pinned) return;
+  event.preventDefault();
+  event.stopPropagation();
   const target = resolveRequestGroup(group);
   if (!target) return;
-  const siblings = activeRequests(target);
-  const siblingIndex = siblings.findIndex((item) => item.id === request.id);
-  const nextSibling = siblings[siblingIndex + direction];
-  if (siblingIndex < 0 || !nextSibling || Boolean(nextSibling.pinned) !== Boolean(request.pinned)) return;
-  const index = target.requests.findIndex((item) => item.id === request.id);
-  const nextIndex = target.requests.findIndex((item) => item.id === nextSibling.id);
-  [target.requests[index], target.requests[nextIndex]] = [target.requests[nextIndex], target.requests[index]];
+  const source = target.requests.find((item) => item.id === request.id);
+  if (!source || source.archived) return;
+  event.currentTarget.setPointerCapture?.(event.pointerId);
+  draggedRequest.value = { groupId: target.id, requestId: source.id, pinned: Boolean(source.pinned) };
+  document.body.classList.add("dragging-request", "request-drag-blocked");
+  window.addEventListener("pointermove", updateRequestDropTarget);
+  window.addEventListener("pointerup", finishRequestDrag);
+  window.addEventListener("pointercancel", cancelRequestDrag);
 }
 
-function canMoveRequest(group, request, direction) {
-  const siblings = activeRequests(group);
-  const index = siblings.findIndex((item) => item.id === request.id);
-  const next = siblings[index + direction];
-  return Boolean(next) && Boolean(next.pinned) === Boolean(request.pinned);
+function updateRequestDropTarget(event) {
+  const dragging = draggedRequest.value;
+  if (!dragging) return;
+  event.preventDefault();
+  const row = document.elementFromPoint(event.clientX, event.clientY)?.closest(".request-item[data-request-id]");
+  const target = row ? findRequestGroupById(row.dataset.groupId)?.group : null;
+  const targetRequest = target?.requests.find((item) => item.id === row?.dataset.requestId);
+  if (!targetRequest || dragging.groupId !== target.id || dragging.requestId === targetRequest.id || dragging.pinned !== Boolean(targetRequest.pinned)) {
+    document.body.classList.add("request-drag-blocked");
+    requestDropTarget.id = "";
+    requestDropTarget.position = "";
+    return;
+  }
+  document.body.classList.remove("request-drag-blocked");
+  const bounds = row.getBoundingClientRect();
+  requestDropTarget.id = targetRequest.id;
+  requestDropTarget.position = event.clientY < bounds.top + bounds.height / 2 ? "before" : "after";
+}
+
+function finishRequestDrag() {
+  const dragging = draggedRequest.value;
+  const target = dragging ? findRequestGroupById(dragging.groupId)?.group : null;
+  if (target && requestDropTarget.id) {
+    const sourceIndex = target.requests.findIndex((item) => item.id === dragging.requestId);
+    if (sourceIndex >= 0) {
+      const [source] = target.requests.splice(sourceIndex, 1);
+      const targetIndex = target.requests.findIndex((item) => item.id === requestDropTarget.id);
+      if (targetIndex < 0) target.requests.splice(sourceIndex, 0, source);
+      else target.requests.splice(targetIndex + (requestDropTarget.position === "after" ? 1 : 0), 0, source);
+    }
+  }
+  cancelRequestDrag();
+}
+
+function cancelRequestDrag() {
+  document.body.classList.remove("dragging-request", "request-drag-blocked");
+  window.removeEventListener("pointermove", updateRequestDropTarget);
+  window.removeEventListener("pointerup", finishRequestDrag);
+  window.removeEventListener("pointercancel", cancelRequestDrag);
+  draggedRequest.value = null;
+  requestDropTarget.id = "";
+  requestDropTarget.position = "";
 }
 
 function togglePinRequest(group, request) {
@@ -1751,6 +1795,26 @@ function addDirectVariable() {
   variableDraftValue.value = "";
 }
 
+function beginAddSubNamespace(parentPath) {
+  subNamespaceParent.value = parentPath;
+  subNamespaceDraft.value = "";
+  collapsedNamespaces[parentPath] = false;
+  nextTick(() => document.querySelector(`[data-sub-namespace="${parentPath}"]`)?.focus());
+}
+
+function addSubNamespace() {
+  const name = subNamespaceDraft.value.trim();
+  if (!subNamespaceParent.value || !name || name.includes(".")) return;
+  addVariableAt(`${subNamespaceParent.value}.${name}`);
+  subNamespaceParent.value = "";
+  subNamespaceDraft.value = "";
+}
+
+function cancelAddSubNamespace() {
+  subNamespaceParent.value = "";
+  subNamespaceDraft.value = "";
+}
+
 function toggleNamespace(path) {
   collapsedNamespaces[path] = !collapsedNamespaces[path];
 }
@@ -2441,6 +2505,7 @@ onBeforeUnmount(() => {
   stopConsoleResize();
   stopSettingsResize();
   stopTemplateListResize();
+  cancelRequestDrag();
   clearTimeout(saveTimer);
   requestSaveTimers.forEach((timer) => clearTimeout(timer));
   requestSaveTimers.clear();
@@ -2518,23 +2583,28 @@ onBeforeUnmount(() => {
             <div v-if="collection.expanded" class="request-list">
               <div v-if="loadingRequestGroups.has(collection.id)" class="empty-group">正在加载接口…</div>
               <button v-else-if="isTauri() && !searchText.trim() && !collection.requestsLoaded && collection.requestCount > 0" class="empty-group loadable" @click="loadGroupRequests(collection)">接口未加载，点击加载</button>
-              <button
+              <div
                 v-for="request in activeRequests(collection)"
                 :key="request.id"
                 class="request-item"
-                :class="{ active: request.id === workspace.selectedRequestId, pinned: request.pinned }"
+                :class="{ active: request.id === workspace.selectedRequestId, pinned: request.pinned, dragging: draggedRequest?.requestId === request.id, 'drop-before': requestDropTarget.id === request.id && requestDropTarget.position === 'before', 'drop-after': requestDropTarget.id === request.id && requestDropTarget.position === 'after' }"
+                :data-group-id="collection.id"
+                :data-request-id="request.id"
+                role="button"
+                tabindex="0"
                 @click="selectRequest(request)"
+                @keydown.enter.prevent="selectRequest(request)"
               >
                 <span class="method-label" :class="methodClass(request.method)">{{ request.method }}</span>
                 <span class="request-item-name"><span>{{ request.name }}</span><Pin v-if="request.pinned" :size="11" class="pinned-indicator" /></span>
                 <span class="request-actions">
-                  <span class="request-action" :class="{ disabled: !canMoveRequest(collection, request, -1) }" title="上移" @click.stop="moveRequest(collection, request, -1)"><ArrowUp :size="13" /></span>
-                  <span class="request-action" :class="{ disabled: !canMoveRequest(collection, request, 1) }" title="下移" @click.stop="moveRequest(collection, request, 1)"><ArrowDown :size="13" /></span>
+                  <span v-if="!request.pinned" class="request-drag-handle" title="拖动排序" @click.stop @pointerdown="startRequestDrag($event, collection, request)"><GripVertical :size="14" /></span>
+                  <span v-else class="request-drag-spacer"></span>
                   <span class="request-action pin-action" :class="{ active: request.pinned }" :title="request.pinned ? '取消置顶' : '置顶请求'" @click.stop="togglePinRequest(collection, request)"><Pin :size="13" /></span>
                   <span class="request-action" title="归档请求" @click.stop="archiveRequest(collection, request)"><Archive :size="13" /></span>
                   <span class="request-action danger" title="删除请求" @click.stop="removeRequest(collection, request)"><X :size="13" /></span>
                 </span>
-              </button>
+              </div>
               <div v-if="collection.requestsLoaded && !activeRequests(collection).length && !collection.groups.length" class="empty-group">暂无活跃请求</div>
               <div v-if="archivedRequests(collection).length" class="archive-section">
                 <button class="archive-heading" @click="toggleArchive(collection)">
@@ -2583,23 +2653,28 @@ onBeforeUnmount(() => {
                 <div v-if="group.expanded" class="subrequest-list">
                   <div v-if="loadingRequestGroups.has(group.id)" class="empty-group">正在加载接口…</div>
                   <button v-else-if="isTauri() && !searchText.trim() && !group.requestsLoaded && group.requestCount > 0" class="empty-group loadable" @click="loadGroupRequests(group)">接口未加载，点击加载</button>
-                  <button
+                  <div
                     v-for="request in activeRequests(group)"
                     :key="request.id"
                     class="request-item"
-                    :class="{ active: request.id === workspace.selectedRequestId, pinned: request.pinned }"
+                    :class="{ active: request.id === workspace.selectedRequestId, pinned: request.pinned, dragging: draggedRequest?.requestId === request.id, 'drop-before': requestDropTarget.id === request.id && requestDropTarget.position === 'before', 'drop-after': requestDropTarget.id === request.id && requestDropTarget.position === 'after' }"
+                    :data-group-id="group.id"
+                    :data-request-id="request.id"
+                    role="button"
+                    tabindex="0"
                     @click="selectRequest(request)"
+                    @keydown.enter.prevent="selectRequest(request)"
                   >
                     <span class="method-label" :class="methodClass(request.method)">{{ request.method }}</span>
                     <span class="request-item-name"><span>{{ request.name }}</span><Pin v-if="request.pinned" :size="11" class="pinned-indicator" /></span>
                     <span class="request-actions">
-                      <span class="request-action" :class="{ disabled: !canMoveRequest(group, request, -1) }" title="上移" @click.stop="moveRequest(group, request, -1)"><ArrowUp :size="13" /></span>
-                      <span class="request-action" :class="{ disabled: !canMoveRequest(group, request, 1) }" title="下移" @click.stop="moveRequest(group, request, 1)"><ArrowDown :size="13" /></span>
+                      <span v-if="!request.pinned" class="request-drag-handle" title="拖动排序" @click.stop @pointerdown="startRequestDrag($event, group, request)"><GripVertical :size="14" /></span>
+                      <span v-else class="request-drag-spacer"></span>
                       <span class="request-action pin-action" :class="{ active: request.pinned }" :title="request.pinned ? '取消置顶' : '置顶请求'" @click.stop="togglePinRequest(group, request)"><Pin :size="13" /></span>
                       <span class="request-action" title="归档请求" @click.stop="archiveRequest(group, request)"><Archive :size="13" /></span>
                       <span class="request-action danger" title="删除请求" @click.stop="removeRequest(group, request)"><X :size="13" /></span>
                     </span>
-                  </button>
+                  </div>
                   <div v-if="group.requestsLoaded && !activeRequests(group).length" class="empty-group">暂无活跃请求</div>
                   <div v-if="archivedRequests(group).length" class="archive-section">
                     <button class="archive-heading" @click="toggleArchive(group)">
@@ -2993,9 +3068,16 @@ onBeforeUnmount(() => {
             </template>
           </div>
           <div class="setting-section variables-section" :class="{ collapsed: collapsedSettings.variables }">
-            <div class="setting-title"><button class="setting-title-toggle" @click="collapsedSettings.variables = !collapsedSettings.variables"><ChevronRight v-if="collapsedSettings.variables" :size="16" /><ChevronDown v-else :size="16" /><div><h3>环境变量</h3><p>可直接添加全局变量，或创建命名空间后添加；支持 <code>token</code>、<code>dev.token</code>、<code>dev.wms.token</code>，最多三级</p></div></button></div>
+            <div class="setting-title"><button class="setting-title-toggle" @click="collapsedSettings.variables = !collapsedSettings.variables"><ChevronRight v-if="collapsedSettings.variables" :size="16" /><ChevronDown v-else :size="16" /><div><h3>环境变量</h3><p>支持 <code>token</code>、<code>dev.token</code>、<code>dev.wms.token</code>，最多三级</p></div></button></div>
             <div v-if="!collapsedSettings.variables" class="variable-tree">
-              <div class="namespace-row root"><span>全局</span><button class="row-action" title="添加全局变量" @click="addVariableAt()"><Plus :size="14" /></button></div>
+              <div class="environment-create">
+                <div class="environment-create-fields direct-variable-fields">
+                  <input v-model="variableDraftKey" :class="{ invalid: variableDraftKey.trim() && !validVariableKey(variableDraftKey.trim()) }" placeholder="变量名" @keydown.enter="addDirectVariable" />
+                  <input v-model="variableDraftValue" placeholder="值" @keydown.enter="addDirectVariable" />
+                  <button :disabled="!variableDraftKey.trim() || !validVariableKey(variableDraftKey.trim())" @click="addDirectVariable"><Plus :size="14" />添加变量</button>
+                </div>
+              </div>
+              <div class="namespace-row root"><span>全局</span></div>
               <div v-for="item in variableHierarchy.roots" :key="item.id" class="kv-row variable-row level-0">
                 <input v-model="item.enabled" type="checkbox" aria-label="启用" />
                 <input :value="item.key" :class="{ invalid: !validVariableKey(item.key) }" placeholder="变量名" @change="renameVariableKey(item, $event.target.value)" />
@@ -3007,9 +3089,16 @@ onBeforeUnmount(() => {
                 <div class="namespace-row" @click="toggleNamespace(group.path)">
                   <ChevronRight v-if="collapsedNamespaces[group.path]" :size="14" /><ChevronDown v-else :size="14" />
                   <Folder :size="15" /><strong>{{ group.name }}</strong>
+                  <button class="row-action" title="添加子分组" @click.stop="beginAddSubNamespace(group.path)"><FolderPlus :size="14" /></button>
                   <button class="row-action" title="在此命名空间添加变量" @click.stop="addVariableAt(group.path)"><Plus :size="14" /></button>
                 </div>
                 <template v-if="!collapsedNamespaces[group.path]">
+                  <div v-if="subNamespaceParent === group.path" class="namespace-create-row">
+                    <FolderPlus :size="14" />
+                    <input v-model="subNamespaceDraft" :data-sub-namespace="group.path" placeholder="子分组名称" @keydown.enter.prevent="addSubNamespace" @keydown.esc="cancelAddSubNamespace" />
+                    <button title="确认" :disabled="!subNamespaceDraft.trim() || subNamespaceDraft.includes('.')" @click="addSubNamespace"><Check :size="14" /></button>
+                    <button title="取消" @click="cancelAddSubNamespace"><X :size="14" /></button>
+                  </div>
                   <div v-for="item in group.variables" :key="item.id" class="kv-row variable-row level-1">
                     <input v-model="item.enabled" type="checkbox" aria-label="启用" />
                     <input :value="variableLeafName(item)" placeholder="变量名" @change="renameVariableLeaf(item, group.path, $event.target.value)" />
@@ -3034,14 +3123,6 @@ onBeforeUnmount(() => {
                 </template>
               </section>
 
-              <div class="environment-create">
-                <div class="environment-create-hint">变量名支持命名空间，例如 <code>token</code>、<code>dev.token</code>、<code>dev.wms.token</code></div>
-                <div class="environment-create-fields direct-variable-fields">
-                  <input v-model="variableDraftKey" :class="{ invalid: variableDraftKey.trim() && !validVariableKey(variableDraftKey.trim()) }" placeholder="变量名" @keydown.enter="addDirectVariable" />
-                  <input v-model="variableDraftValue" placeholder="值" @keydown.enter="addDirectVariable" />
-                  <button :disabled="!variableDraftKey.trim() || !validVariableKey(variableDraftKey.trim())" @click="addDirectVariable"><Plus :size="14" />添加变量</button>
-                </div>
-              </div>
             </div>
           </div>
         </div>
