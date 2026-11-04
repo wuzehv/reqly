@@ -15,6 +15,7 @@ import {
   ClipboardPaste,
   Code2,
   Copy,
+  CopyPlus,
   Download,
   FileJson,
   FileInput,
@@ -861,13 +862,44 @@ async function addRequest(group) {
   nameInput?.select();
 }
 
-function archiveRequest(group, request) {
+async function archiveRequest(group, request) {
   const target = resolveRequestGroup(group);
   const targetRequest = target?.requests.find((item) => item.id === request.id);
   if (!targetRequest) return;
   targetRequest.archived = true;
   if (requestDetails.has(request.id)) requestDetails.get(request.id).archived = true;
   target.archiveExpanded = true;
+}
+
+async function duplicateRequest(group, request) {
+  const target = resolveRequestGroup(group);
+  if (!target) return;
+  if (isTauri() && !target.requestsLoaded) {
+    try {
+      await loadGroupRequests(target);
+    } catch (error) {
+      showNotice(`加载分组失败：${formatError(error)}`);
+      return;
+    }
+  }
+  const source = await loadRequestDetail(request.id);
+  const clone = { ...cloneData(source), id: uid(), name: `${request.name} 副本` };
+  for (const field of ["params", "headers", "formBody", "formData"]) {
+    clone[field] = (clone[field] || []).map((item) => ({ ...item, id: uid() }));
+  }
+  if (isTauri()) {
+    cacheRequestDetail(clone);
+    target.requests.push(requestSummary(clone));
+  } else {
+    target.requests.push(clone);
+  }
+  target.requestCount = target.requests.length;
+  target.expanded = true;
+  await changeSelectedRequest(clone.id);
+  await nextTick();
+  const nameInput = document.querySelector(".request-name");
+  nameInput?.focus();
+  nameInput?.select();
 }
 
 function restoreRequest(group, request) {
@@ -2660,6 +2692,7 @@ onBeforeUnmount(() => {
                   <span v-else class="request-drag-spacer"></span>
                   <span class="request-action pin-action" :class="{ active: request.pinned }" :title="request.pinned ? '取消置顶' : '置顶请求'" @click.stop="togglePinRequest(collection, request)"><Pin :size="13" /></span>
                   <span class="request-action" title="归档请求" @click.stop="archiveRequest(collection, request)"><Archive :size="13" /></span>
+                  <span class="request-action" title="复制到当前分组" @click.stop="duplicateRequest(collection, request)"><CopyPlus :size="13" /></span>
                   <span class="request-action danger" title="删除请求" @click.stop="removeRequest(collection, request)"><X :size="13" /></span>
                 </span>
               </div>
@@ -2684,6 +2717,7 @@ onBeforeUnmount(() => {
                     <span class="request-item-name">{{ request.name }}</span>
                     <span class="request-actions">
                       <span class="request-action" title="恢复请求" @click.stop="restoreRequest(collection, request)"><ArchiveRestore :size="13" /></span>
+                      <span class="request-action" title="复制到当前分组" @click.stop="duplicateRequest(collection, request)"><CopyPlus :size="13" /></span>
                       <span class="request-action danger" title="删除请求" @click.stop="removeRequest(collection, request)"><X :size="13" /></span>
                     </span>
                   </button>
@@ -2730,6 +2764,7 @@ onBeforeUnmount(() => {
                       <span v-else class="request-drag-spacer"></span>
                       <span class="request-action pin-action" :class="{ active: request.pinned }" :title="request.pinned ? '取消置顶' : '置顶请求'" @click.stop="togglePinRequest(group, request)"><Pin :size="13" /></span>
                       <span class="request-action" title="归档请求" @click.stop="archiveRequest(group, request)"><Archive :size="13" /></span>
+                      <span class="request-action" title="复制到当前分组" @click.stop="duplicateRequest(group, request)"><CopyPlus :size="13" /></span>
                       <span class="request-action danger" title="删除请求" @click.stop="removeRequest(group, request)"><X :size="13" /></span>
                     </span>
                   </div>
@@ -2745,6 +2780,7 @@ onBeforeUnmount(() => {
                         <span class="request-item-name"><span>{{ request.name }}</span></span>
                         <span class="request-actions">
                           <span class="request-action" title="恢复请求" @click.stop="restoreRequest(group, request)"><ArchiveRestore :size="13" /></span>
+                          <span class="request-action" title="复制到当前分组" @click.stop="duplicateRequest(group, request)"><CopyPlus :size="13" /></span>
                           <span class="request-action danger" title="删除请求" @click.stop="removeRequest(group, request)"><X :size="13" /></span>
                         </span>
                       </button>
