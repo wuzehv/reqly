@@ -60,17 +60,41 @@ jobs:
         if: steps.universal-bundle-cache.outputs.cache-hit != 'true'
         run: npm ci
 
-      - name: Build macOS DMG
+      - name: Build macOS universal app
         if: steps.universal-bundle-cache.outputs.cache-hit != 'true'
         env:
           MACOSX_DEPLOYMENT_TARGET: "11.0"
-        run: npm run tauri -- build --target universal-apple-darwin --bundles dmg
+        run: npm run tauri -- build --target universal-apple-darwin --bundles app
 
       - name: Verify executable architecture
         run: |
           APP_EXECUTABLE="src-tauri/target/universal-apple-darwin/release/bundle/macos/reqly.app/Contents/MacOS/reqly"
           file "$APP_EXECUTABLE"
           lipo "$APP_EXECUTABLE" -verify_arch x86_64 arm64
+
+      - name: Create macOS DMG
+        if: steps.universal-bundle-cache.outputs.cache-hit != 'true'
+        run: |
+          APP_PATH="src-tauri/target/universal-apple-darwin/release/bundle/macos/reqly.app"
+          DMG_DIR="src-tauri/target/universal-apple-darwin/release/bundle/dmg"
+          STAGING_DIR="$RUNNER_TEMP/reqly-dmg"
+          VERSION="$(node -p 'require("./src-tauri/tauri.conf.json").version')"
+          rm -rf "$STAGING_DIR"
+          mkdir -p "$STAGING_DIR" "$DMG_DIR"
+          ditto "$APP_PATH" "$STAGING_DIR/reqly.app"
+          ln -s /Applications "$STAGING_DIR/Applications"
+          hdiutil create \
+            -volname "Reqly" \
+            -srcfolder "$STAGING_DIR" \
+            -ov \
+            -format UDZO \
+            "$DMG_DIR/reqly_${VERSION}_universal.dmg"
+
+      - name: Verify DMG image
+        run: |
+          for dmg in src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg; do
+            hdiutil verify "$dmg"
+          done
 
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
