@@ -155,6 +155,7 @@ const confirmDialog = reactive({
   title: "",
   message: "",
   confirmLabel: "确认",
+  cancelLabel: "取消",
   resolve: null,
 });
 const resizingSidebar = ref(false);
@@ -199,11 +200,12 @@ function toggleConsole() {
   if (consoleOpen.value) consoleUnread.value = 0;
 }
 
-function askConfirm({ title, message, confirmLabel = "确认" }) {
+function askConfirm({ title, message, confirmLabel = "确认", cancelLabel = "取消" }) {
   if (confirmDialog.resolve) confirmDialog.resolve(false);
   confirmDialog.title = title;
   confirmDialog.message = message;
   confirmDialog.confirmLabel = confirmLabel;
+  confirmDialog.cancelLabel = cancelLabel;
   confirmDialog.open = true;
   return new Promise((resolve) => {
     confirmDialog.resolve = resolve;
@@ -1360,6 +1362,25 @@ async function exportSubgroup(group) {
   }
 }
 
+async function chooseImportPreScriptStrategy(conflict) {
+  if (!conflict) return "create";
+  const useExisting = await askConfirm({
+    title: "发现同名 Pre Script 模板",
+    message: `工作区已存在“${conflict.profileName}”。使用现有模板不会修改其脚本内容；新增副本会创建带随机编号的新模板。`,
+    confirmLabel: "使用现有",
+    cancelLabel: "新增副本",
+  });
+  return useExisting ? "reuse" : "create";
+}
+
+function browserImportPreScriptConflict(payload) {
+  if (payload?.format !== "reqly-collection") return null;
+  const profileName = payload.data?.preScriptProfile?.name?.trim();
+  if (!profileName) return null;
+  const existing = workspace.preScriptProfiles.find((profile) => profile.name === profileName);
+  return existing ? { profileName, templateId: existing.id } : null;
+}
+
 async function openArtifactImport() {
   if (!isTauri()) {
     artifactImportInput.value?.click();
@@ -1370,15 +1391,17 @@ async function openArtifactImport() {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const path = await open({ multiple: false, filters: [{ name: "Reqly JSON", extensions: ["json"] }] });
     if (!path) return;
+    importingArtifact.value = true;
     clearTimeout(saveTimer);
     await persist();
+    const conflict = await invoke("inspect_artifact_import", { path });
+    const preScriptStrategy = await chooseImportPreScriptStrategy(conflict);
     const groupUiState = new Map(workspace.collections.flatMap(requestContainers).map((group) => [group.id, {
       expanded: group.expanded,
       archiveExpanded: group.archiveExpanded,
       requestsLoaded: group.requestsLoaded,
     }]));
     clearTimeout(importProgressTimer);
-    importingArtifact.value = true;
     suppressWorkspaceSave += 1;
     importProgress.open = true;
     importProgress.percent = 0;
@@ -1386,6 +1409,7 @@ async function openArtifactImport() {
     const result = await invoke("import_artifact", {
       path,
       targetGroupId: selectedRequestGroup.value?.id || null,
+      preScriptStrategy,
     });
     const selectedId = result.selectedRequestId || workspace.selectedRequestId;
     Object.assign(workspace, normalizeWorkspace(result.workspace));
@@ -1474,11 +1498,13 @@ function registerImportedPreScript(script, name) {
   return profile.id;
 }
 
-function importedPreScriptBinding(source, fallback) {
+function importedPreScriptBinding(source, fallback, strategy = "create") {
   if (source.preScriptBinding === "") return "";
   const embedded = source.preScriptProfile;
   if (embedded && typeof embedded.script === "string") {
     const baseName = embedded.name || `${source.name} Pre Script`;
+    const existing = workspace.preScriptProfiles.find((profile) => profile.name === baseName);
+    if (strategy === "reuse" && existing) return existing.id;
     const profile = { id: uid(), name: importedProfileName(baseName, workspace.preScriptProfiles), script: embedded.script };
     workspace.preScriptProfiles.push(profile);
     return profile.id;
@@ -1520,7 +1546,7 @@ async function cloneImportedSubgroup(source, progress) {
   return group;
 }
 
-async function cloneImportedCollection(source, progress) {
+async function cloneImportedCollection(source, progress, preScriptStrategy = "create") {
   if (!source || typeof source.name !== "string" || !Array.isArray(source.requests || [])) throw new Error("分组数据格式无效");
   const { requests: _requests, groups: _groups, ...metadata } = source;
   const collection = {
@@ -1529,7 +1555,7 @@ async function cloneImportedCollection(source, progress) {
     name: `${source.name} 副本`,
     expanded: true,
     archiveExpanded: false,
-    preScriptProfileId: importedPreScriptBinding(source, ""),
+    preScriptProfileId: importedPreScriptBinding(source, "", preScriptStrategy),
     preScriptPlaceholders: importedPreScriptPlaceholders(source),
     requests: [],
     groups: [],
@@ -1566,6 +1592,7 @@ async function importArtifactFile(event) {
     importProgress.label = "正在解析 JSON";
     await yieldToUi();
     const payload = await parseImportContent(content);
+    const preScriptStrategy = await chooseImportPreScriptStrategy(browserImportPreScriptConflict(payload));
     const totalRequests = payload?.format === "reqly-collection"
       ? (payload.data.requests || []).length + (payload.data.groups || []).reduce((sum, group) => sum + (group.requests || []).length, 0)
       : payload?.format === "reqly-subgroup" ? (payload.data.requests || []).length : 1;
@@ -1596,7 +1623,7 @@ async function importArtifactFile(event) {
       parent.groups.push(await cloneImportedSubgroup(payload.data, updateCloneProgress));
       parent.expanded = true;
     } else if (payload?.format === "reqly-collection") {
-      const collection = await cloneImportedCollection(payload.data, updateCloneProgress);
+      const collection = await cloneImportedCollection(payload.data, updateCloneProgress, preScriptStrategy);
       workspace.collections.push(collection);
       workspace.selectedRequestId = collectionRequests(collection).find((request) => !request.archived)?.id || "";
     } else {
@@ -2411,6 +2438,10 @@ function handleKeydown(event) {
     batchResponseFullscreen.value = false;
     return;
   }
+  if (event.key === "Escape" && settingsOpen.value) {
+    settingsOpen.value = false;
+    return;
+  }
   if (event.key === "Escape" && batchOpen.value && !batchRunning.value) {
     batchOpen.value = false;
     return;
@@ -2956,7 +2987,7 @@ onBeforeUnmount(() => {
       <main v-else class="no-selection"><div class="empty-logo">R</div><strong>还没有请求</strong><span>从左侧分组创建请求</span></main>
     </div>
 
-    <div v-if="batchOpen" class="batch-backdrop" @click.self="!batchRunning && (batchOpen = false)">
+    <div v-if="batchOpen" class="batch-backdrop">
       <section class="batch-runner" role="dialog" aria-modal="true" aria-label="批量运行">
         <header>
           <div><span class="eyebrow">DATA RUNNER</span><h2>批量运行</h2></div>
@@ -3020,13 +3051,12 @@ onBeforeUnmount(() => {
         <footer>
           <span v-if="batchStopping" class="batch-stop-hint">当前请求完成后停止</span>
           <button v-if="batchRunning" class="dialog-button danger-confirm" :disabled="batchStopping" @click="stopBatchRun">{{ batchStopping ? '正在停止' : '停止' }}</button>
-          <button v-else class="dialog-button" @click="batchOpen = false">关闭</button>
           <button class="primary-button" :disabled="batchRunning || !selectedRequest.batchData.trim()" @click="runBatch"><Send :size="16" />{{ batchResults.length ? '重新运行' : '开始运行' }}</button>
         </footer>
       </section>
     </div>
 
-    <div v-if="settingsOpen" class="modal-backdrop" @click.self="settingsOpen = false">
+    <div v-if="settingsOpen" class="modal-backdrop">
       <div class="settings-resizer" title="拖动调整设置面板宽度" @pointerdown="startSettingsResize"></div>
       <section class="settings-panel" :style="{ width: `${workspace.appearance.settingsWidth || 520}px` }">
         <header><div><span class="eyebrow">WORKSPACE</span><h2>设置</h2></div><button class="icon-button" title="关闭" @click="settingsOpen = false"><X :size="19" /></button></header>
@@ -3153,7 +3183,6 @@ onBeforeUnmount(() => {
             </div>
           </div>
         </div>
-        <footer><button class="primary-button" @click="settingsOpen = false"><Check :size="16" />完成</button></footer>
       </section>
     </div>
 
@@ -3162,7 +3191,7 @@ onBeforeUnmount(() => {
         <div class="confirm-icon"><AlertTriangle :size="20" /></div>
         <div class="confirm-copy"><h3>{{ confirmDialog.title }}</h3><p>{{ confirmDialog.message }}</p></div>
         <div class="confirm-actions">
-          <button type="button" class="dialog-button" @click="resolveConfirm(false)">取消</button>
+          <button type="button" class="dialog-button" @click="resolveConfirm(false)">{{ confirmDialog.cancelLabel }}</button>
           <button type="submit" class="dialog-button danger-confirm">{{ confirmDialog.confirmLabel }}</button>
         </div>
       </form>

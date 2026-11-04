@@ -143,22 +143,34 @@ fn write_export_file(path: String, content: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn inspect_artifact_import(app: AppHandle, path: String) -> Result<Option<Value>, String> {
+    storage::inspect_artifact_import(&app, &path)
+}
+
+#[tauri::command]
 async fn import_artifact(
     app: AppHandle,
     path: String,
     target_group_id: Option<String>,
+    pre_script_strategy: Option<String>,
 ) -> Result<Value, String> {
     let progress_app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        storage::import_artifact(&app, &path, target_group_id.as_deref(), |percent, label| {
-            let _ = progress_app.emit(
-                "artifact-import-progress",
-                serde_json::json!({
-                    "percent": percent,
-                    "label": label,
-                }),
-            );
-        })
+        storage::import_artifact(
+            &app,
+            &path,
+            target_group_id.as_deref(),
+            pre_script_strategy.as_deref(),
+            |percent, label| {
+                let _ = progress_app.emit(
+                    "artifact-import-progress",
+                    serde_json::json!({
+                        "percent": percent,
+                        "label": label,
+                    }),
+                );
+            },
+        )
     })
     .await
     .map_err(|error| error.to_string())?
@@ -283,6 +295,7 @@ pub fn run() {
             complete_mcp_request,
             get_mcp_addresses,
             write_export_file,
+            inspect_artifact_import,
             import_artifact
         ])
         .run(tauri::generate_context!())

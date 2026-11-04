@@ -338,10 +338,37 @@ pub(crate) fn load_workspace_with_summaries(app: &AppHandle) -> Result<Option<Va
     Ok(Some(workspace))
 }
 
+pub(crate) fn inspect_artifact_import(
+    app: &AppHandle,
+    path: &str,
+) -> Result<Option<Value>, String> {
+    let content = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let payload: Value = serde_json::from_str(&content).map_err(|error| error.to_string())?;
+    if payload["format"].as_str() != Some("reqly-collection") {
+        return Ok(None);
+    }
+    let Some(profile_name) = payload
+        .pointer("/data/preScriptProfile/name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    else {
+        return Ok(None);
+    };
+    let workspace = load_workspace_index(app)?.ok_or("工作区尚未初始化")?;
+    let existing = workspace["preScriptProfiles"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|profile| profile["name"].as_str() == Some(profile_name));
+    Ok(existing.map(|profile| json!({ "profileName": profile_name, "templateId": profile["id"] })))
+}
+
 pub(crate) fn import_artifact<F>(
     app: &AppHandle,
     path: &str,
     target_container_id: Option<&str>,
+    pre_script_strategy: Option<&str>,
     mut progress: F,
 ) -> Result<Value, String>
 where
@@ -352,7 +379,7 @@ where
     progress(20, "正在解析 JSON");
     let payload: Value = serde_json::from_str(&content).map_err(|error| error.to_string())?;
     let format = payload["format"].as_str().ok_or("不支持的文件类型")?;
-    let data = payload.get("data").cloned().ok_or("导入文件缺少 data")?;
+    let mut data = payload.get("data").cloned().ok_or("导入文件缺少 data")?;
     let total = artifact_request_count(format, &data).max(1);
     let mut processed = 0usize;
     let mut report = |processed: usize| {
@@ -362,6 +389,28 @@ where
 
     let mut connection = open(app)?;
     let mut workspace = load_workspace_index(app)?.ok_or("工作区尚未初始化")?;
+    if format == "reqly-collection" && pre_script_strategy == Some("reuse") {
+        let profile_name = data
+            .pointer("/preScriptProfile/name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty());
+        if let Some(profile_name) = profile_name {
+            let existing_id = workspace["preScriptProfiles"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|profile| profile["name"].as_str() == Some(profile_name))
+                .and_then(|profile| profile["id"].as_str())
+                .map(str::to_string);
+            if let Some(existing_id) = existing_id {
+                data["preScriptProfileId"] = Value::String(existing_id);
+                data["preScriptBinding"] = Value::Null;
+                data["preScriptProfile"] = Value::Null;
+                data["preScript"] = Value::Null;
+            }
+        }
+    }
     let selected_request_id = match format {
         "reqly-request" => {
             let target_id = target_container_id
