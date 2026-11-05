@@ -35,7 +35,7 @@ jobs:
         with:
           name: reqly-windows-updater
           path: |
-            src-tauri/target/release/bundle/nsis/reqly_*_x64-setup.nsis.zip
-            src-tauri/target/release/bundle/nsis/reqly_*_x64-setup.nsis.zip.sig
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/nsis/*.exe.sig
           if-no-files-found: error
           retention-days: 14

@@ -86,7 +86,7 @@ jobs:
             return `https://github.com/${process.env.REPOSITORY}/releases/download/${process.env.RELEASE_TAG}/${encodeURIComponent(name)}`;
           }
 
-          const windowsArtifact = findOne("artifacts/windows", ".nsis.zip");
+          const windowsArtifact = findOne("artifacts/windows", ".exe");
           const macArtifact = findOne("artifacts/macos", ".app.tar.gz");
           const manifest = {
             version,
@@ -120,6 +120,6 @@ jobs:
             artifacts/macos/*.app.tar.gz
             artifacts/macos/*.app.tar.gz.sig
             artifacts/windows/*.msi
-            artifacts/windows/*.nsis.zip
-            artifacts/windows/*.nsis.zip.sig
+            artifacts/windows/*.exe
+            artifacts/windows/*.exe.sig
             latest.json
