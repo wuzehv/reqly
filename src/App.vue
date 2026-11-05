@@ -167,7 +167,10 @@ const updaterState = reactive({
   error: "",
   checked: false,
 });
+const dismissedUpdateVersion = ref("");
 let pendingUpdate = null;
+let updateCheckTimer;
+let lastUpdateCheckAt = 0;
 const confirmDialog = reactive({
   open: false,
   title: "",
@@ -243,6 +246,11 @@ const isTauri = () => Boolean(window.__TAURI_INTERNALS__);
 const isWindows = () => /Windows/i.test(navigator.userAgent);
 const supportsAutoUpdate = () => isTauri() && /(Windows|Macintosh|Mac OS X)/i.test(navigator.userAgent);
 const updaterSupported = computed(supportsAutoUpdate);
+const updateNoticeVisible = computed(() =>
+  updaterState.available
+  && !updaterState.downloaded
+  && updaterState.version !== dismissedUpdateVersion.value,
+);
 const updaterStatusText = computed(() => {
   if (!updaterSupported.value) return "当前平台暂不支持自动更新";
   if (updaterState.checking) return "正在检查更新";
@@ -255,6 +263,7 @@ const updaterStatusText = computed(() => {
 
 async function checkForUpdates(silent = false) {
   if (!supportsAutoUpdate() || updaterState.checking || updaterState.downloading) return;
+  lastUpdateCheckAt = Date.now();
   updaterState.checking = true;
   updaterState.error = "";
   updaterState.checked = false;
@@ -282,6 +291,32 @@ async function checkForUpdates(silent = false) {
   } finally {
     updaterState.checking = false;
   }
+}
+
+const UPDATE_CHECK_INTERVAL = 4 * 60 * 60 * 1000;
+const UPDATE_FOCUS_THROTTLE = 15 * 60 * 1000;
+
+async function automaticallyCheckForUpdates(force = false) {
+  if (!supportsAutoUpdate()) return;
+  if (!force && Date.now() - lastUpdateCheckAt < UPDATE_FOCUS_THROTTLE) return;
+  await checkForUpdates(true);
+}
+
+function handleUpdateFocus() {
+  if (document.visibilityState === "visible") void automaticallyCheckForUpdates();
+}
+
+function startAutomaticUpdateChecks() {
+  if (!supportsAutoUpdate()) return;
+  window.addEventListener("focus", handleUpdateFocus);
+  document.addEventListener("visibilitychange", handleUpdateFocus);
+  updateCheckTimer = window.setInterval(() => void automaticallyCheckForUpdates(true), UPDATE_CHECK_INTERVAL);
+}
+
+function openUpdateSettings() {
+  settingsOpen.value = true;
+  collapsedSettings.about = false;
+  nextTick(() => document.querySelector(".about-section")?.scrollIntoView({ block: "center" }));
 }
 async function downloadAndInstallUpdate() {
   if (!pendingUpdate || updaterState.checking || updaterState.downloading) return;
@@ -324,7 +359,7 @@ async function initializeUpdater() {
   } catch (error) {
     updaterState.error = `读取版本失败：${String(error?.message || error)}`;
   }
-  if (supportsAutoUpdate()) await checkForUpdates(true);
+  if (supportsAutoUpdate()) await automaticallyCheckForUpdates(true);
 }
 
 const requestContainers = (collection) => [collection, ...(collection.groups || [])];
@@ -2593,6 +2628,7 @@ function handleKeydown(event) {
 
 onMounted(async () => {
   window.addEventListener("keydown", handleKeydown);
+  startAutomaticUpdateChecks();
   void initializeUpdater();
   try {
     if (isTauri()) {
@@ -2694,6 +2730,8 @@ onBeforeUnmount(() => {
   stopMcpRequestListener?.();
   stopArtifactProgressListener?.();
   window.removeEventListener("keydown", handleKeydown);
+  window.removeEventListener("focus", handleUpdateFocus);
+  document.removeEventListener("visibilitychange", handleUpdateFocus);
   stopSidebarResize();
   stopRequestResize();
   stopConsoleResize();
@@ -2706,6 +2744,7 @@ onBeforeUnmount(() => {
   clearTimeout(noticeTimer);
   clearTimeout(importProgressTimer);
   clearTimeout(requestSearchTimer);
+  clearInterval(updateCheckTimer);
 });
 </script>
 
@@ -2724,7 +2763,13 @@ onBeforeUnmount(() => {
         <button class="icon-button" title="代理与环境变量" @click="settingsOpen = true"><Settings2 :size="18" /></button>
       </div>
     </header>
-    <div v-if="noticeMessage" class="app-notice"><AlertTriangle :size="16" /><span>{{ noticeMessage }}</span></div>
+    <div v-if="updateNoticeVisible" class="app-update-notice" role="status">
+      <RefreshCw :size="16" />
+      <span>发现 Reqly v{{ updaterState.version }}</span>
+      <button class="app-update-action" @click="openUpdateSettings">查看更新</button>
+      <button class="app-update-dismiss" title="暂时忽略" @click="dismissedUpdateVersion = updaterState.version"><X :size="15" /></button>
+    </div>
+    <div v-if="noticeMessage" class="app-notice" :class="{ 'with-update': updateNoticeVisible }"><AlertTriangle :size="16" /><span>{{ noticeMessage }}</span></div>
 
     <div class="workspace-layout" :style="{ '--sidebar-width': `${workspace.appearance.sidebarWidth || 252}px` }">
       <aside class="sidebar">

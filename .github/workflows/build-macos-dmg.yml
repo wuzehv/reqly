@@ -75,7 +75,7 @@ jobs:
           APP_PATH="src-tauri/target/universal-apple-darwin/release/bundle/macos/reqly.app"
           DMG_DIR="src-tauri/target/universal-apple-darwin/release/bundle/dmg"
           STAGING_DIR="$RUNNER_TEMP/reqly-dmg"
-          VERSION="$(node -p 'require("./src-tauri/tauri.conf.json").version')"
+          VERSION="$(node -p 'require("./package.json").version')"
           rm -rf "$STAGING_DIR"
           mkdir -p "$STAGING_DIR" "$DMG_DIR"
           ditto "$APP_PATH" "$STAGING_DIR/reqly.app"

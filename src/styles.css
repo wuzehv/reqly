@@ -37,6 +37,14 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .brand-mark { width: 23px; height: 23px; border-radius: 5px; font-size: 15px; }
 .topbar-actions { display: flex; align-items: center; gap: 8px; }
 .app-notice { position: fixed; top: 60px; left: 50%; z-index: 80; min-height: 38px; display: flex; align-items: center; gap: 8px; transform: translateX(-50%); border: 1px solid #d5aa63; border-radius: 5px; padding: 0 13px; color: #73501a; background: #fff5df; box-shadow: 0 8px 24px rgba(47, 58, 66, .18); font-size: 13px; }
+.app-notice.with-update { top: 106px; }
+.app-update-notice { position: fixed; top: 60px; left: 50%; z-index: 80; min-height: 38px; max-width: calc(100vw - 24px); display: flex; align-items: center; gap: 9px; transform: translateX(-50%); border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--line)); border-radius: 5px; padding: 0 6px 0 12px; color: var(--text); background: var(--panel); box-shadow: 0 8px 24px rgba(47, 58, 66, .18); font-size: 13px; white-space: nowrap; }
+.app-update-notice > svg { flex: 0 0 auto; color: var(--accent); }
+.app-update-notice > span { overflow: hidden; text-overflow: ellipsis; }
+.app-update-action { height: 27px; flex: 0 0 auto; border: 0; border-radius: 4px; padding: 0 9px; color: #fff; background: var(--accent); font-size: 11px; font-weight: 600; cursor: pointer; }
+.app-update-action:hover { opacity: .88; }
+.app-update-dismiss { width: 27px; height: 27px; flex: 0 0 auto; display: grid; place-items: center; border: 0; border-radius: 4px; padding: 0; color: var(--muted); background: transparent; cursor: pointer; }
+.app-update-dismiss:hover { color: var(--text); background: var(--panel-soft); }
 .sidebar-import-progress { flex: 0 0 auto; margin: 5px 2px 0; border: 1px solid #c5ced3; border-radius: 4px; padding: 7px 8px; background: #f3f5f5; }
 .sidebar-import-progress > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 7px; }
 .sidebar-import-progress > div:first-child span { min-width: 0; overflow: hidden; color: #64717a; font-size: 10px; white-space: nowrap; text-overflow: ellipsis; }
@@ -650,6 +658,7 @@ input[type="checkbox"] { width: 13px; height: 13px; margin: 0 0 0 5px; accent-co
 }
 .theme-dark .topbar { background: #1d2023; }
 .theme-dark .app-notice { border-color: #765c30; color: #e6c687; background: #332b1e; box-shadow: 0 8px 28px rgba(0, 0, 0, .35); }
+.theme-dark .app-update-notice { box-shadow: 0 8px 28px rgba(0, 0, 0, .35); }
 .theme-dark .sidebar-import-progress { border-color: #41484e; background: #252a2e; }
 .theme-dark .sidebar-import-progress > div:first-child span { color: #9aa3aa; }
 .theme-dark .import-progress-track { background: #3a4147; }
