@@ -462,12 +462,12 @@ async function toggleSubgroup(group) {
 }
 
 function toggleCollectionFromRow(event, collection) {
-  if (event.target.closest(".collapse-button, .row-action, input")) return;
+  if (event.target.closest(".row-action, input")) return;
   toggleCollection(collection);
 }
 
 function toggleSubgroupFromRow(event, group) {
-  if (event.target.closest(".collapse-button, .row-action, input")) return;
+  if (event.target.closest(".row-action, input")) return;
   toggleSubgroup(group);
 }
 
@@ -2798,9 +2798,9 @@ onBeforeUnmount(() => {
         <div class="collection-list">
           <section v-for="collection in filteredCollections" :key="collection.id" class="collection" :class="{ 'has-selected-request': collectionRequests(collection).some((request) => request.id === workspace.selectedRequestId) }">
             <div class="collection-row" @click="toggleCollectionFromRow($event, collection)">
-              <button class="collapse-button" @click="toggleCollection(collection)">
+              <span class="collapse-button" aria-hidden="true">
                 <ChevronDown v-if="collection.expanded" :size="15" /><ChevronRight v-else :size="15" />
-              </button>
+              </span>
               <Folder :size="16" class="folder-icon" />
               <input
                 v-if="editingCollectionId === collection.id"
@@ -2876,7 +2876,7 @@ onBeforeUnmount(() => {
               </div>
               <section v-for="group in collection.groups" :key="group.id" class="subcollection" :class="{ active: group.requests.some((request) => request.id === workspace.selectedRequestId) }">
                 <div class="subcollection-row" @click="toggleSubgroupFromRow($event, group)">
-                  <button class="collapse-button" @click="toggleSubgroup(group)"><ChevronDown v-if="group.expanded" :size="15" /><ChevronRight v-else :size="15" /></button>
+                  <span class="collapse-button" aria-hidden="true"><ChevronDown v-if="group.expanded" :size="15" /><ChevronRight v-else :size="15" /></span>
                   <Folder :size="16" class="folder-icon" />
                   <input
                     v-if="editingCollectionId === group.id"
@@ -3375,7 +3375,7 @@ onBeforeUnmount(() => {
                 <div class="setting-status-row" :class="{ running: updaterState.checked && !updaterState.available && !updaterState.error, available: updaterState.available, error: updaterState.error }">
                   <span class="setting-status-dot"></span>
                   <strong>Reqly {{ appVersion ? `v${appVersion}` : "开发模式" }}</strong>
-                  <code>{{ updaterStatusText }}</code>
+                  <span class="setting-status-text">{{ updaterStatusText }}</span>
                   <button
                     v-if="updaterSupported"
                     class="setting-row-action"
