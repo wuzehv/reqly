@@ -3,8 +3,6 @@ name: Build Windows MSI
 on:
   workflow_dispatch:
   workflow_call:
-  push:
-    branches: [main, master]
 
 permissions:
   contents: read

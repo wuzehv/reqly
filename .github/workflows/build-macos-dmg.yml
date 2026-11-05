@@ -3,10 +3,6 @@ name: Build macOS Universal DMG
 on:
   workflow_dispatch:
   workflow_call:
-  push:
-    branches:
-      - main
-      - master
 
 permissions:
   contents: read
