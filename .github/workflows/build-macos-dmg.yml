@@ -2,15 +2,14 @@ name: Build macOS Universal DMG
 
 on:
   workflow_dispatch:
+  workflow_call:
   push:
     branches:
       - main
       - master
-    tags:
-      - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: macos-dmg-${{ github.ref }}
@@ -64,6 +63,8 @@ jobs:
         if: steps.universal-bundle-cache.outputs.cache-hit != 'true'
         env:
           MACOSX_DEPLOYMENT_TARGET: "11.0"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
         run: npm run tauri -- build --target universal-apple-darwin --bundles app
 
       - name: Verify executable architecture
@@ -104,10 +105,12 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+      - name: Upload macOS updater artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: Reqly ${{ github.ref_name }}
-          generate_release_notes: true
-          files: src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          name: reqly-macos-updater
+          path: |
+            src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
+          if-no-files-found: error
+          retention-days: 14

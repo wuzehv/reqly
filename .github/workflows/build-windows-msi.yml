@@ -1,0 +1,43 @@
+name: Build Windows MSI
+
+on:
+  workflow_dispatch:
+  workflow_call:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-msi-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-msi:
+    name: Build Windows MSI
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: src-tauri -> target, shared-key: windows, cache-on-failure: true }
+      - run: npm ci
+      - name: Build Windows installers
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
+        run: npm run tauri -- build --bundles nsis,msi
+      - uses: actions/upload-artifact@v4
+        with: { name: reqly-windows-msi, path: src-tauri/target/release/bundle/msi/*.msi, if-no-files-found: error, retention-days: 14 }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reqly-windows-updater
+          path: |
+            src-tauri/target/release/bundle/nsis/reqly_*_x64-setup.nsis.zip
+            src-tauri/target/release/bundle/nsis/reqly_*_x64-setup.nsis.zip.sig
+          if-no-files-found: error
+          retention-days: 14

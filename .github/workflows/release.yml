@@ -1,0 +1,125 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-macos:
+    uses: ./.github/workflows/build-macos-dmg.yml
+    secrets: inherit
+
+  build-windows:
+    uses: ./.github/workflows/build-windows-msi.yml
+    secrets: inherit
+
+  publish:
+    name: Publish GitHub Release
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+      REPOSITORY: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download macOS DMG
+        uses: actions/download-artifact@v4
+        with:
+          name: reqly-macos-universal-dmg
+          path: artifacts/macos
+
+      - name: Download macOS updater
+        uses: actions/download-artifact@v4
+        with:
+          name: reqly-macos-updater
+          path: artifacts/macos
+
+      - name: Download Windows MSI
+        uses: actions/download-artifact@v4
+        with:
+          name: reqly-windows-msi
+          path: artifacts/windows
+
+      - name: Download Windows updater
+        uses: actions/download-artifact@v4
+        with:
+          name: reqly-windows-updater
+          path: artifacts/windows
+
+      - name: Generate updater manifest
+        run: |
+          node <<'NODE'
+          const fs = require("node:fs");
+          const path = require("node:path");
+
+          const config = JSON.parse(fs.readFileSync("src-tauri/tauri.conf.json", "utf8"));
+          const version = config.version;
+          const expectedTag = `v${version}`;
+          if (process.env.RELEASE_TAG !== expectedTag) {
+            throw new Error(`Release tag ${process.env.RELEASE_TAG} does not match app version ${expectedTag}`);
+          }
+
+          function findOne(directory, suffix) {
+            const matches = fs.readdirSync(directory).filter((name) => name.endsWith(suffix));
+            if (matches.length !== 1) {
+              throw new Error(`Expected one ${suffix} file in ${directory}, found ${matches.length}`);
+            }
+            return matches[0];
+          }
+
+          function signature(directory, artifactName) {
+            const value = fs.readFileSync(path.join(directory, `${artifactName}.sig`), "utf8").trim();
+            if (!value) throw new Error(`Signature for ${artifactName} is empty`);
+            return value;
+          }
+
+          function assetUrl(name) {
+            return `https://github.com/${process.env.REPOSITORY}/releases/download/${process.env.RELEASE_TAG}/${encodeURIComponent(name)}`;
+          }
+
+          const windowsArtifact = findOne("artifacts/windows", ".nsis.zip");
+          const macArtifact = findOne("artifacts/macos", ".app.tar.gz");
+          const manifest = {
+            version,
+            notes: `Reqly ${version}`,
+            pub_date: new Date().toISOString(),
+            platforms: {
+              "windows-x86_64": {
+                signature: signature("artifacts/windows", windowsArtifact),
+                url: assetUrl(windowsArtifact),
+              },
+              "darwin-aarch64": {
+                signature: signature("artifacts/macos", macArtifact),
+                url: assetUrl(macArtifact),
+              },
+              "darwin-x86_64": {
+                signature: signature("artifacts/macos", macArtifact),
+                url: assetUrl(macArtifact),
+              },
+            },
+          };
+          fs.writeFileSync("latest.json", `${JSON.stringify(manifest, null, 2)}\n`);
+          NODE
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Reqly ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            artifacts/macos/*.dmg
+            artifacts/macos/*.app.tar.gz
+            artifacts/macos/*.app.tar.gz.sig
+            artifacts/windows/*.msi
+            artifacts/windows/*.nsis.zip
+            artifacts/windows/*.nsis.zip.sig
+            latest.json

@@ -1,7 +1,10 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, toRaw, watch } from "vue";
+import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { check } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import ResponseViewer from "./components/ResponseViewer.vue";
 import ScriptEditor from "./components/ScriptEditor.vue";
 import {
@@ -27,6 +30,7 @@ import {
   Pencil,
   Pin,
   Plus,
+  RefreshCw,
   Save,
   Search,
   Send,
@@ -150,7 +154,20 @@ const variableDraftValue = ref("");
 const subNamespaceParent = ref("");
 const subNamespaceDraft = ref("");
 const collapsedNamespaces = reactive({});
-const collapsedSettings = reactive({ theme: true, accent: true, mcp: true, proxy: true, variables: false });
+const collapsedSettings = reactive({ theme: true, accent: true, mcp: true, proxy: true, variables: false, about: true });
+const appVersion = ref("");
+const updaterState = reactive({
+  checking: false,
+  available: false,
+  version: "",
+  notes: "",
+  downloading: false,
+  downloaded: false,
+  progress: 0,
+  error: "",
+  checked: false,
+});
+let pendingUpdate = null;
 const confirmDialog = reactive({
   open: false,
   title: "",
@@ -223,6 +240,92 @@ function resolveConfirm(result) {
 }
 
 const isTauri = () => Boolean(window.__TAURI_INTERNALS__);
+const isWindows = () => /Windows/i.test(navigator.userAgent);
+const supportsAutoUpdate = () => isTauri() && /(Windows|Macintosh|Mac OS X)/i.test(navigator.userAgent);
+const updaterSupported = computed(supportsAutoUpdate);
+const updaterStatusText = computed(() => {
+  if (!updaterSupported.value) return "当前平台暂不支持自动更新";
+  if (updaterState.checking) return "正在检查更新";
+  if (updaterState.downloading) return `正在下载 ${updaterState.progress}%`;
+  if (updaterState.available) return `发现新版本 v${updaterState.version}`;
+  if (updaterState.error) return "更新检查失败";
+  if (updaterState.checked) return "已是最新版本";
+  return "尚未检查更新";
+});
+
+async function checkForUpdates(silent = false) {
+  if (!supportsAutoUpdate() || updaterState.checking || updaterState.downloading) return;
+  updaterState.checking = true;
+  updaterState.error = "";
+  updaterState.checked = false;
+  try {
+    const update = await check();
+    if (pendingUpdate && pendingUpdate !== update) {
+      await pendingUpdate.close();
+    }
+    pendingUpdate = update;
+    if (update) {
+      updaterState.available = true;
+      updaterState.version = update.version;
+      updaterState.notes = update.body || "";
+      if (!silent) showNotice(`发现新版本 v${update.version}`);
+    } else {
+      updaterState.available = false;
+      updaterState.version = "";
+      updaterState.notes = "";
+      if (!silent) showNotice("当前已是最新版本");
+    }
+    updaterState.checked = true;
+  } catch (error) {
+    updaterState.error = String(error?.message || error);
+    if (!silent) showNotice(`检查更新失败：${updaterState.error}`);
+  } finally {
+    updaterState.checking = false;
+  }
+}
+async function downloadAndInstallUpdate() {
+  if (!pendingUpdate || updaterState.checking || updaterState.downloading) return;
+  updaterState.downloading = true;
+  updaterState.downloaded = false;
+  updaterState.error = "";
+  updaterState.progress = 0;
+  let contentLength = 0;
+  let downloadedBytes = 0;
+  try {
+    await pendingUpdate.downloadAndInstall((event) => {
+      if (event.event === "Started") {
+        contentLength = event.data.contentLength || 0;
+        downloadedBytes = 0;
+        updaterState.progress = 0;
+      } else if (event.event === "Progress") {
+        downloadedBytes += event.data.chunkLength;
+        updaterState.progress = contentLength
+          ? Math.min(100, Math.round((downloadedBytes / contentLength) * 100))
+          : 0;
+      } else if (event.event === "Finished") {
+        updaterState.progress = 100;
+      }
+    });
+    updaterState.downloaded = true;
+    if (!isWindows()) await relaunch();
+  } catch (error) {
+    updaterState.downloaded = false;
+    updaterState.error = String(error?.message || error);
+    showNotice(`更新失败：${updaterState.error}`);
+  } finally {
+    updaterState.downloading = false;
+  }
+}
+
+async function initializeUpdater() {
+  if (!isTauri()) return;
+  try {
+    appVersion.value = await getVersion();
+  } catch (error) {
+    updaterState.error = `读取版本失败：${String(error?.message || error)}`;
+  }
+  if (supportsAutoUpdate()) await checkForUpdates(true);
+}
 
 const requestContainers = (collection) => [collection, ...(collection.groups || [])];
 const collectionRequests = (collection) => requestContainers(collection).flatMap((group) => group.requests || []);
@@ -2490,6 +2593,7 @@ function handleKeydown(event) {
 
 onMounted(async () => {
   window.addEventListener("keydown", handleKeydown);
+  void initializeUpdater();
   try {
     if (isTauri()) {
       stopWorkspaceListener = await listen("workspace-updated", async (event) => {
@@ -2706,21 +2810,23 @@ onBeforeUnmount(() => {
                   <span class="archive-count">{{ archivedRequests(collection).length }}</span>
                 </button>
                 <div v-if="collection.archiveExpanded || searchText.trim()" class="archive-list">
-                  <button
+                  <div
                     v-for="request in archivedRequests(collection)"
                     :key="request.id"
                     class="request-item archived"
                     :class="{ active: request.id === workspace.selectedRequestId }"
+                    role="button"
+                    tabindex="0"
                     @click="selectRequest(request)"
+                    @keydown.enter.prevent="selectRequest(request)"
                   >
                     <span class="method-label" :class="methodClass(request.method)">{{ request.method }}</span>
-                    <span class="request-item-name">{{ request.name }}</span>
+                    <span class="request-item-name"><span>{{ request.name }}</span></span>
                     <span class="request-actions">
                       <span class="request-action" title="恢复请求" @click.stop="restoreRequest(collection, request)"><ArchiveRestore :size="13" /></span>
-                      <span class="request-action" title="复制到当前分组" @click.stop="duplicateRequest(collection, request)"><CopyPlus :size="13" /></span>
                       <span class="request-action danger" title="删除请求" @click.stop="removeRequest(collection, request)"><X :size="13" /></span>
                     </span>
-                  </button>
+                  </div>
                 </div>
               </div>
               <section v-for="group in collection.groups" :key="group.id" class="subcollection" :class="{ active: group.requests.some((request) => request.id === workspace.selectedRequestId) }">
@@ -2775,15 +2881,14 @@ onBeforeUnmount(() => {
                       <Archive :size="13" /><span>归档</span><span class="archive-count">{{ archivedRequests(group).length }}</span>
                     </button>
                     <div v-if="group.archiveExpanded || searchText.trim()" class="archive-list">
-                      <button v-for="request in archivedRequests(group)" :key="request.id" class="request-item archived" :class="{ active: request.id === workspace.selectedRequestId }" @click="selectRequest(request)">
+                      <div v-for="request in archivedRequests(group)" :key="request.id" class="request-item archived" :class="{ active: request.id === workspace.selectedRequestId }" role="button" tabindex="0" @click="selectRequest(request)" @keydown.enter.prevent="selectRequest(request)">
                         <span class="method-label" :class="methodClass(request.method)">{{ request.method }}</span>
                         <span class="request-item-name"><span>{{ request.name }}</span></span>
                         <span class="request-actions">
                           <span class="request-action" title="恢复请求" @click.stop="restoreRequest(group, request)"><ArchiveRestore :size="13" /></span>
-                          <span class="request-action" title="复制到当前分组" @click.stop="duplicateRequest(group, request)"><CopyPlus :size="13" /></span>
                           <span class="request-action danger" title="删除请求" @click.stop="removeRequest(group, request)"><X :size="13" /></span>
                         </span>
-                      </button>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -3129,11 +3234,11 @@ onBeforeUnmount(() => {
             </div>
             <template v-if="!collapsedSettings.mcp">
             <label class="field mcp-port-field"><span>监听端口</span><input v-model.number="workspace.mcp.port" type="number" min="1024" max="65535" step="1" :disabled="mcpRuntime.applying" @change="workspace.mcp.enabled && applyMcpConfig()" /></label>
-            <div class="mcp-status-row" :class="{ running: mcpRuntime.running, error: mcpRuntime.error }">
-              <span class="mcp-status-dot"></span>
+            <div class="setting-status-row" :class="{ running: mcpRuntime.running, error: mcpRuntime.error }">
+              <span class="setting-status-dot"></span>
               <strong>{{ mcpRuntime.applying ? '正在应用' : mcpRuntime.running ? '运行中' : '已关闭' }}</strong>
               <code>http://0.0.0.0:{{ workspace.mcp.port }}/mcp</code>
-              <button class="mcp-address-trigger" :disabled="!workspace.mcp.enabled" :title="mcpAddressesOpen ? '收起地址' : '查看所有地址'" @click="toggleMcpAddresses"><Network :size="14" /><span>{{ mcpAddressesOpen ? '收起' : '地址' }}</span></button>
+              <button class="setting-row-action" :disabled="!workspace.mcp.enabled" :title="mcpAddressesOpen ? '收起地址' : '查看所有地址'" @click="toggleMcpAddresses"><Network :size="14" /><span>{{ mcpAddressesOpen ? '收起' : '地址' }}</span></button>
             </div>
             <div v-if="mcpAddressesOpen" class="mcp-address-list">
               <div v-for="address in mcpAddresses" :key="address" class="mcp-address-row">
@@ -3217,6 +3322,46 @@ onBeforeUnmount(() => {
               </section>
 
             </div>
+          </div>
+          <div class="setting-section" :class="{ collapsed: collapsedSettings.about }">
+            <div class="setting-title"><button class="setting-title-toggle" @click="collapsedSettings.about = !collapsedSettings.about"><ChevronRight v-if="collapsedSettings.about" :size="16" /><ChevronDown v-else :size="16" /><div><h3>关于与更新</h3><p>检查并安装最新版本</p></div></button></div>
+            <template v-if="!collapsedSettings.about">
+              <div class="about-section">
+                <div class="setting-status-row" :class="{ running: updaterState.checked && !updaterState.available && !updaterState.error, available: updaterState.available, error: updaterState.error }">
+                  <span class="setting-status-dot"></span>
+                  <strong>Reqly {{ appVersion ? `v${appVersion}` : "开发模式" }}</strong>
+                  <code>{{ updaterStatusText }}</code>
+                  <button
+                    v-if="updaterSupported"
+                    class="setting-row-action"
+                    :disabled="updaterState.checking || updaterState.downloading"
+                    title="检查更新"
+                    @click="checkForUpdates(false)"
+                  >
+                    <RefreshCw :size="14" :class="{ spinning: updaterState.checking }" />
+                    <span>检查</span>
+                  </button>
+                </div>
+                <div v-if="updaterState.available" class="about-update-details">
+                  <p v-if="updaterState.notes" class="about-update-notes">{{ updaterState.notes }}</p>
+                  <div v-if="updaterState.downloading" class="about-progress">
+                    <div class="about-progress-track"><div class="about-progress-bar" :style="{ width: `${updaterState.progress}%` }"></div></div>
+                    <span>{{ updaterState.progress }}%</span>
+                  </div>
+                  <button
+                    v-if="!updaterState.downloaded"
+                    class="primary-button about-update-btn"
+                    :disabled="updaterState.checking || updaterState.downloading"
+                    @click="downloadAndInstallUpdate"
+                  >
+                    <Download :size="15" />
+                    {{ updaterState.downloading ? `下载中 ${updaterState.progress}%` : "下载并安装" }}
+                  </button>
+                  <div v-else class="about-update-done">下载完成，正在重启…</div>
+                </div>
+                <div v-if="updaterState.error" class="mcp-setting-error">{{ updaterState.error }}</div>
+              </div>
+            </template>
           </div>
         </div>
       </section>
