@@ -61,8 +61,7 @@ jobs:
           const fs = require("node:fs");
           const path = require("node:path");
 
-          const config = JSON.parse(fs.readFileSync("src-tauri/tauri.conf.json", "utf8"));
-          const version = config.version;
+          const version = JSON.parse(fs.readFileSync("package.json", "utf8")).version;
           const expectedTag = `v${version}`;
           if (process.env.RELEASE_TAG !== expectedTag) {
             throw new Error(`Release tag ${process.env.RELEASE_TAG} does not match app version ${expectedTag}`);
