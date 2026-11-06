@@ -670,6 +670,8 @@ const variableHierarchy = computed(() => {
 });
 
 const methodClass = (method) => `method-${method.toLowerCase()}`;
+const sidebarNameParts = (value) => String(value || "").split(/([A-Z][A-Z0-9_-]*[A-Z0-9])/g).filter(Boolean);
+const isSidebarCapsPart = (value) => /^[A-Z][A-Z0-9_-]*[A-Z0-9]$/.test(value);
 
 const selectedBatchResult = computed(() =>
   batchResults.value.find((item) => item.id === selectedBatchResultId.value) || null,
@@ -2810,7 +2812,7 @@ onBeforeUnmount(() => {
                 @blur="finishRenameCollection(collection)"
                 @keydown.enter.prevent="$event.currentTarget.blur()"
               />
-              <span v-else class="collection-name">{{ collection.name }}</span>
+              <span v-else class="collection-name"><span v-for="(part, index) in sidebarNameParts(collection.name)" :key="index" :class="{ 'sidebar-caps': isSidebarCapsPart(part) }">{{ part }}</span></span>
               <span class="count">{{ collectionRequestCount(collection) }}</span>
               <button class="row-action" title="重命名集合" @click="beginRenameCollection(collection)"><Pencil :size="13" /></button>
               <button class="row-action" title="集合脚本" @click="openCollectionScript(collection)"><Code2 :size="14" /></button>
@@ -2835,7 +2837,7 @@ onBeforeUnmount(() => {
                 @keydown.enter.prevent="selectRequest(request)"
               >
                 <span class="method-label" :class="methodClass(request.method)">{{ request.method }}</span>
-                <span class="request-item-name"><span>{{ request.name }}</span><Pin v-if="request.pinned" :size="11" class="pinned-indicator" /></span>
+                <span class="request-item-name"><span><span v-for="(part, index) in sidebarNameParts(request.name)" :key="index" :class="{ 'sidebar-caps': isSidebarCapsPart(part) }">{{ part }}</span></span><Pin v-if="request.pinned" :size="11" class="pinned-indicator" /></span>
                 <span class="request-actions">
                   <span v-if="!request.pinned" class="request-drag-handle" title="拖动排序" @click.stop @pointerdown="startRequestDrag($event, collection, request)"><GripVertical :size="14" /></span>
                   <span v-else class="request-drag-spacer"></span>
@@ -2846,7 +2848,7 @@ onBeforeUnmount(() => {
                 </span>
               </div>
               <div v-if="collection.requestsLoaded && !activeRequests(collection).length && !collection.groups.length" class="empty-group">暂无活跃请求</div>
-              <div v-if="archivedRequests(collection).length" class="archive-section">
+              <div v-if="archivedRequests(collection).length" class="archive-section" :class="{ active: archivedRequests(collection).some((request) => request.id === workspace.selectedRequestId) }">
                 <button class="archive-heading" @click="toggleArchive(collection)">
                   <ChevronDown v-if="collection.archiveExpanded || searchText.trim()" :size="13" />
                   <ChevronRight v-else :size="13" />
@@ -2866,7 +2868,7 @@ onBeforeUnmount(() => {
                     @keydown.enter.prevent="selectRequest(request)"
                   >
                     <span class="method-label" :class="methodClass(request.method)">{{ request.method }}</span>
-                    <span class="request-item-name"><span>{{ request.name }}</span></span>
+                    <span class="request-item-name"><span><span v-for="(part, index) in sidebarNameParts(request.name)" :key="index" :class="{ 'sidebar-caps': isSidebarCapsPart(part) }">{{ part }}</span></span></span>
                     <span class="request-actions">
                       <span class="request-action" title="恢复请求" @click.stop="restoreRequest(collection, request)"><ArchiveRestore :size="13" /></span>
                       <span class="request-action danger" title="删除请求" @click.stop="removeRequest(collection, request)"><X :size="13" /></span>
@@ -2886,7 +2888,7 @@ onBeforeUnmount(() => {
                     @blur="finishRenameCollection(group)"
                     @keydown.enter.prevent="$event.currentTarget.blur()"
                   />
-                  <span v-else class="collection-name">{{ group.name }}</span>
+                  <span v-else class="collection-name"><span v-for="(part, index) in sidebarNameParts(group.name)" :key="index" :class="{ 'sidebar-caps': isSidebarCapsPart(part) }">{{ part }}</span></span>
                   <span class="count">{{ group.requestCount || group.requests.length }}</span>
                   <button class="row-action" title="重命名分组" @click="beginRenameCollection(group)"><Pencil :size="12" /></button>
                   <button class="row-action" title="添加请求" @click="addRequest(group)"><Plus :size="14" /></button>
@@ -2909,7 +2911,7 @@ onBeforeUnmount(() => {
                     @keydown.enter.prevent="selectRequest(request)"
                   >
                     <span class="method-label" :class="methodClass(request.method)">{{ request.method }}</span>
-                    <span class="request-item-name"><span>{{ request.name }}</span><Pin v-if="request.pinned" :size="11" class="pinned-indicator" /></span>
+                    <span class="request-item-name"><span><span v-for="(part, index) in sidebarNameParts(request.name)" :key="index" :class="{ 'sidebar-caps': isSidebarCapsPart(part) }">{{ part }}</span></span><Pin v-if="request.pinned" :size="11" class="pinned-indicator" /></span>
                     <span class="request-actions">
                       <span v-if="!request.pinned" class="request-drag-handle" title="拖动排序" @click.stop @pointerdown="startRequestDrag($event, group, request)"><GripVertical :size="14" /></span>
                       <span v-else class="request-drag-spacer"></span>
@@ -2920,7 +2922,7 @@ onBeforeUnmount(() => {
                     </span>
                   </div>
                   <div v-if="group.requestsLoaded && !activeRequests(group).length" class="empty-group">暂无活跃请求</div>
-                  <div v-if="archivedRequests(group).length" class="archive-section">
+                  <div v-if="archivedRequests(group).length" class="archive-section" :class="{ active: archivedRequests(group).some((request) => request.id === workspace.selectedRequestId) }">
                     <button class="archive-heading" @click="toggleArchive(group)">
                       <ChevronDown v-if="group.archiveExpanded || searchText.trim()" :size="13" /><ChevronRight v-else :size="13" />
                       <Archive :size="13" /><span>归档</span><span class="archive-count">{{ archivedRequests(group).length }}</span>
@@ -2928,7 +2930,7 @@ onBeforeUnmount(() => {
                     <div v-if="group.archiveExpanded || searchText.trim()" class="archive-list">
                       <div v-for="request in archivedRequests(group)" :key="request.id" class="request-item archived" :class="{ active: request.id === workspace.selectedRequestId }" role="button" tabindex="0" @click="selectRequest(request)" @keydown.enter.prevent="selectRequest(request)">
                         <span class="method-label" :class="methodClass(request.method)">{{ request.method }}</span>
-                        <span class="request-item-name"><span>{{ request.name }}</span></span>
+                        <span class="request-item-name"><span><span v-for="(part, index) in sidebarNameParts(request.name)" :key="index" :class="{ 'sidebar-caps': isSidebarCapsPart(part) }">{{ part }}</span></span></span>
                         <span class="request-actions">
                           <span class="request-action" title="恢复请求" @click.stop="restoreRequest(group, request)"><ArchiveRestore :size="13" /></span>
                           <span class="request-action danger" title="删除请求" @click.stop="removeRequest(group, request)"><X :size="13" /></span>
