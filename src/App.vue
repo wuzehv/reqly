@@ -34,6 +34,7 @@ import {
   Save,
   Search,
   Send,
+  Server,
   Settings2,
   Sun,
   Terminal,
@@ -60,6 +61,8 @@ const legacyBatchData = "[\n  {\n    \"id\": 1\n  },\n  {\n    \"id\": 2\n  }\n]
 const themeColors = ["#d65f35", "#3276c3", "#27805f", "#7654b5", "#b94b68"];
 const mcpTools = [
   { name: "reqly_list_collections", description: "列出集合、子分组和请求" },
+  { name: "reqly_list_environments", description: "列出环境和当前环境" },
+  { name: "reqly_switch_environment", description: "切换工作区当前环境" },
   { name: "reqly_create_collection", description: "创建一级集合" },
   { name: "reqly_create_subgroup", description: "创建二级分组" },
   { name: "reqly_create_request", description: "创建请求及 Post Script" },
@@ -80,6 +83,7 @@ const makeRequest = (name = "新请求", url = "") => ({
   headers: [pair("Accept", "application/json")],
   bodyType: "none",
   body: "",
+  bodyEnvironmentValues: {},
   formBody: [pair()],
   formData: [pair()],
   postScript: defaultPostScript,
@@ -90,11 +94,14 @@ const makeRequest = (name = "新请求", url = "") => ({
 
 const defaultWorkspace = () => {
   const request = makeRequest("示例请求", "https://httpbin.org/get");
+  const environmentId = uid();
   return {
     collections: [{ id: uid(), name: "我的接口", expanded: true, preScriptProfileId: "", preScriptPlaceholders: [], requests: [request], requestCount: 1, requestsLoaded: true, groups: [] }],
     preScriptProfiles: [],
     selectedRequestId: request.id,
-    variables: [pair("baseUrl", "https://httpbin.org")],
+    variables: [],
+    environments: [{ id: environmentId, name: "Default", color: "#ffffff", isDefault: true, variables: [pair("baseUrl", "https://httpbin.org")] }],
+    activeEnvironmentId: environmentId,
     proxy: { enabled: false, url: "http://127.0.0.1:7890", username: "", password: "" },
     mcp: { enabled: true, port: 3765 },
     appearance: { mode: "light", accent: themeColors[0], sidebarWidth: 252, requestEditorHeight: 430, consoleHeight: 300, settingsWidth: 520, templateListWidth: 220 },
@@ -111,6 +118,8 @@ const sendingRequestIds = reactive(new Set());
 const sending = computed(() => sendingRequestIds.has(workspace.selectedRequestId));
 const saveState = ref("saved");
 const settingsOpen = ref(false);
+const environmentMenuOpen = ref(false);
+const settingsEnvironmentId = ref(workspace.activeEnvironmentId);
 const mcpRuntime = reactive({ running: false, port: null, applying: false, error: "" });
 const mcpAddresses = ref([]);
 const mcpAddressesOpen = ref(false);
@@ -151,6 +160,7 @@ const consoleOpen = ref(false);
 const consoleUnread = ref(0);
 const variableDraftKey = ref("");
 const variableDraftValue = ref("");
+const environmentDraftName = ref("");
 const subNamespaceParent = ref("");
 const subNamespaceDraft = ref("");
 const collapsedNamespaces = reactive({});
@@ -313,8 +323,14 @@ function startAutomaticUpdateChecks() {
   updateCheckTimer = window.setInterval(() => void automaticallyCheckForUpdates(true), UPDATE_CHECK_INTERVAL);
 }
 
-function openUpdateSettings() {
+function openSettings() {
+  environmentMenuOpen.value = false;
+  settingsEnvironmentId.value = workspace.activeEnvironmentId;
   settingsOpen.value = true;
+}
+
+function openUpdateSettings() {
+  openSettings();
   collapsedSettings.about = false;
   nextTick(() => document.querySelector(".about-section")?.scrollIntoView({ block: "center" }));
 }
@@ -511,6 +527,7 @@ function normalizeRequest(request, inheritedPostScript = defaultPostScript) {
   request.headers ||= [pair()];
   request.bodyType ||= "none";
   request.body ||= "";
+  request.bodyEnvironmentValues ||= {};
   request.formBody ||= [pair()];
   request.formData ||= [pair()];
   request.postScript ??= inheritedPostScript || defaultPostScript;
@@ -551,6 +568,12 @@ const selectedRequest = computed(() =>
   requestDetails.get(workspace.selectedRequestId)
     || (selectedRequestLocation.value?.request?.params ? selectedRequestLocation.value.request : null),
 );
+const activeRequestBody = computed({
+  get: () => selectedRequest.value ? requestBodyValue(selectedRequest.value) : "",
+  set: (value) => {
+    if (selectedRequest.value) setRequestBodyValue(selectedRequest.value, value);
+  },
+});
 
 const selectedCollection = computed(() => selectedRequestLocation.value?.collection || null);
 const selectedRequestGroup = computed(() => selectedRequestLocation.value?.group || null);
@@ -625,10 +648,86 @@ const activeRequests = (collection) => collection.requests
   .sort((left, right) => Number(Boolean(right.pinned)) - Number(Boolean(left.pinned)));
 const archivedRequests = (collection) => collection.requests.filter((request) => request.archived);
 
+const activeEnvironment = computed(() =>
+  workspace.environments.find((environment) => environment.id === workspace.activeEnvironmentId)
+    || workspace.environments[0],
+);
+const activeEnvironmentVariables = computed(() => activeEnvironment.value?.variables || []);
+const defaultEnvironment = computed(() => workspace.environments.find((environment) => environment.isDefault) || workspace.environments[0]);
+const activeEnvironmentIsDefault = computed(() => activeEnvironment.value?.id === defaultEnvironment.value?.id);
+const settingsEnvironment = computed(() =>
+  workspace.environments.find((environment) => environment.id === settingsEnvironmentId.value)
+    || activeEnvironment.value,
+);
+const settingsEnvironmentVariables = computed(() => settingsEnvironment.value?.variables || []);
+
+function environmentTextColor(color) {
+  const match = /^#([0-9a-f]{6})$/i.exec(color || "");
+  if (!match) return "#263139";
+  const value = Number.parseInt(match[1], 16);
+  const red = (value >> 16) & 255;
+  const green = (value >> 8) & 255;
+  const blue = value & 255;
+  return (red * 299 + green * 587 + blue * 114) / 1000 >= 155 ? "#263139" : "#ffffff";
+}
+
+function environmentVariables(environmentId = workspace.activeEnvironmentId) {
+  const environment = workspace.environments.find((item) => item.id === environmentId);
+  if (!environment) throw new Error(`未找到环境：${environmentId}`);
+  return environment.variables;
+}
+
+function hasEnvironmentValue(item, environmentId = workspace.activeEnvironmentId) {
+  return !workspace.environments.find((environment) => environment.id === environmentId)?.isDefault
+    && Object.prototype.hasOwnProperty.call(item.environmentValues || {}, environmentId);
+}
+
+function requestValue(item, environmentId = workspace.activeEnvironmentId) {
+  return hasEnvironmentValue(item, environmentId) ? item.environmentValues[environmentId] : item.value;
+}
+
+function setRequestValue(item, value, environmentId = workspace.activeEnvironmentId) {
+  const environment = workspace.environments.find((candidate) => candidate.id === environmentId);
+  if (!environment || environment.isDefault) {
+    item.value = value;
+    return;
+  }
+  item.environmentValues ||= {};
+  item.environmentValues[environmentId] = value;
+}
+
+function hasBodyEnvironmentValue(request, environmentId = workspace.activeEnvironmentId) {
+  return !workspace.environments.find((environment) => environment.id === environmentId)?.isDefault
+    && Object.prototype.hasOwnProperty.call(request.bodyEnvironmentValues || {}, environmentId);
+}
+
+function requestBodyValue(request, environmentId = workspace.activeEnvironmentId) {
+  return hasBodyEnvironmentValue(request, environmentId) ? request.bodyEnvironmentValues[environmentId] : request.body;
+}
+
+function setRequestBodyValue(request, value, environmentId = workspace.activeEnvironmentId) {
+  const environment = workspace.environments.find((candidate) => candidate.id === environmentId);
+  if (!environment || environment.isDefault) {
+    request.body = value;
+    return;
+  }
+  request.bodyEnvironmentValues ||= {};
+  request.bodyEnvironmentValues[environmentId] = value;
+}
+
+function applyRequestEnvironment(request, environmentId = workspace.activeEnvironmentId) {
+  const output = cloneData(request);
+  for (const field of ["params", "headers", "formBody", "formData"]) {
+    for (const item of output[field] || []) item.value = requestValue(item, environmentId);
+  }
+  output.body = requestBodyValue(output, environmentId);
+  return output;
+}
+
 const variableHierarchy = computed(() => {
   const roots = [];
   const groups = new Map();
-  for (const variable of workspace.variables) {
+  for (const variable of settingsEnvironmentVariables.value) {
     if (!variable.key && variable.namespace) {
       const namespaceParts = variable.namespace.split(".");
       if (!groups.has(namespaceParts[0])) {
@@ -897,7 +996,7 @@ function placeholderVariableOptions(group, name) {
   const binding = ensurePreScriptPlaceholder(group, name);
   const key = placeholderSearchKey(group, name);
   const query = placeholderVariableSearch[key] ?? binding.source;
-  const values = [...new Set(workspace.variables.filter((item) => item.enabled && item.key).map((item) => item.key))];
+  const values = [...new Set(activeEnvironmentVariables.value.filter((item) => item.enabled && item.key).map((item) => item.key))];
   return values
     .filter((value) => fuzzyVariableMatch(value, query))
     .sort((left, right) => {
@@ -1209,12 +1308,12 @@ function isStructuredJson(value) {
 }
 
 function usesJsonEditor(item) {
-  return Boolean(jsonValueEditors[item.id]) || isStructuredJson(item.value);
+  return Boolean(jsonValueEditors[item.id]) || isStructuredJson(requestValue(item));
 }
 
 function updateJsonValue(item, value, request) {
   jsonValueEditors[item.id] = true;
-  item.value = value;
+  setRequestValue(item, value);
   if (request) syncUrlFromParams(request);
 }
 
@@ -1328,6 +1427,33 @@ function normalizeWorkspace(saved) {
   saved.appearance.consoleHeight ||= 300;
   saved.appearance.settingsWidth ||= 520;
   saved.appearance.templateListWidth ||= 220;
+  saved.variables ||= [];
+  if (!Array.isArray(saved.environments) || !saved.environments.length) {
+    const environmentId = uid();
+    saved.environments = [{ id: environmentId, name: "Default", color: "#ffffff", isDefault: true, variables: saved.variables }];
+    saved.variables = [];
+    saved.activeEnvironmentId = environmentId;
+  }
+  saved.environments = saved.environments
+    .filter((environment) => environment && typeof environment === "object")
+    .map((environment, index) => ({
+      id: environment.id || uid(),
+      name: environment.name?.trim() || `环境 ${index + 1}`,
+      color: environment.color || "#ffffff",
+      isDefault: Boolean(environment.isDefault),
+      variables: Array.isArray(environment.variables) ? environment.variables : [],
+    }));
+  if (!saved.environments.length) {
+    const environmentId = uid();
+    saved.environments.push({ id: environmentId, name: "Default", color: "#ffffff", isDefault: true, variables: [pair()] });
+  }
+  const defaultEnvironment = saved.environments.find((environment) => environment.isDefault) || saved.environments[0];
+  saved.environments.forEach((environment) => (environment.isDefault = environment.id === defaultEnvironment.id));
+  defaultEnvironment.name = "Default";
+  defaultEnvironment.color = "#ffffff";
+  if (!saved.environments.some((environment) => environment.id === saved.activeEnvironmentId)) {
+    saved.activeEnvironmentId = saved.environments[0].id;
+  }
   const legacyPreScriptWorkspace = !Array.isArray(saved.preScriptProfiles);
   saved.preScriptProfiles ||= [];
   saved.preScriptProfiles = saved.preScriptProfiles
@@ -1972,30 +2098,64 @@ function renameVariableKey(variable, value) {
 }
 
 function removeVariable(variable) {
-  workspace.variables = workspace.variables.filter((item) => item.id !== variable.id);
-  if (!workspace.variables.length) workspace.variables.push(pair());
+  const variables = settingsEnvironmentVariables.value;
+  const index = variables.findIndex((item) => item.id === variable.id);
+  if (index >= 0) variables.splice(index, 1);
+  if (!variables.length) variables.push(pair());
 }
 
 function addVariableAt(namespace = "") {
   const variable = pair();
   if (namespace) variable.namespace = namespace;
-  workspace.variables.push(variable);
+  settingsEnvironmentVariables.value.push(variable);
   collapsedNamespaces[namespace] = false;
 }
 
 function addDirectVariable() {
   const key = variableDraftKey.value.trim();
   if (!key || !validVariableKey(key)) return;
-  const existing = workspace.variables.find((item) => item.key === key);
+  const existing = settingsEnvironmentVariables.value.find((item) => item.key === key);
   if (existing) {
     existing.value = variableDraftValue.value;
     existing.enabled = true;
     delete existing.namespace;
   } else {
-    workspace.variables.push(pair(key, variableDraftValue.value));
+    settingsEnvironmentVariables.value.push(pair(key, variableDraftValue.value));
   }
   variableDraftKey.value = "";
   variableDraftValue.value = "";
+}
+
+function addEnvironment() {
+  const name = environmentDraftName.value.trim();
+  if (!name) return;
+  const environment = {
+    id: uid(),
+    name,
+    color: "#ffffff",
+    isDefault: false,
+    variables: [pair()],
+  };
+  workspace.environments.push(environment);
+  settingsEnvironmentId.value = environment.id;
+  environmentDraftName.value = "";
+}
+
+async function removeEnvironment() {
+  const environment = settingsEnvironment.value;
+  if (workspace.environments.length <= 1 || !environment || environment.isDefault) return;
+  const confirmed = await askConfirm({
+    title: "删除环境",
+    message: `确定删除“${environment.name}”及其全部变量吗？`,
+    confirmLabel: "删除",
+  });
+  if (!confirmed) return;
+  const index = workspace.environments.findIndex((item) => item.id === environment.id);
+  workspace.environments.splice(index, 1);
+  settingsEnvironmentId.value = workspace.environments[Math.min(index, workspace.environments.length - 1)].id;
+  if (workspace.activeEnvironmentId === environment.id) {
+    workspace.activeEnvironmentId = workspace.environments.find((item) => item.isDefault)?.id || workspace.environments[0].id;
+  }
 }
 
 function beginAddSubNamespace(parentPath) {
@@ -2053,7 +2213,7 @@ function resolvePreScript(group, variables) {
   });
 }
 
-function batchVariables(overrides, baseVariables = workspace.variables) {
+function batchVariables(overrides, baseVariables = activeEnvironmentVariables.value) {
   const rows = cloneData(baseVariables);
   for (const [key, rawValue] of Object.entries(overrides)) {
     const value = batchVariableValue(rawValue);
@@ -2166,7 +2326,7 @@ async function executeHttp(input) {
   };
 }
 
-async function sendSandboxRequest(nestedRequest, variables = workspace.variables) {
+async function sendSandboxRequest(nestedRequest, variables = activeEnvironmentVariables.value) {
   appendConsole({ phase: "request", level: "info", args: [`${nestedRequest.method} ${nestedRequest.url}`] });
   const result = await executeHttp({
     ...prepareInput({ ...nestedRequest, params: [] }, variablesMapFrom(variables)),
@@ -2182,13 +2342,15 @@ async function sendSandboxRequest(nestedRequest, variables = workspace.variables
   };
 }
 
-function applyScriptVariables(variables) {
+function applyScriptVariables(variables, environmentId) {
+  const targetVariables = environmentVariables(environmentId);
   const outputKeys = new Set(variables.map((variable) => variable.key));
-  const disabledVariables = workspace.variables.filter((item) => !item.enabled);
-  workspace.variables = [...disabledVariables.filter((variable) => !outputKeys.has(variable.key)), ...variables];
+  const disabledVariables = targetVariables.filter((item) => !item.enabled);
+  const environment = workspace.environments.find((item) => item.id === environmentId);
+  environment.variables = [...disabledVariables.filter((variable) => !outputKeys.has(variable.key)), ...variables];
 }
 
-async function buildInput(source, variables = cloneData(workspace.variables), persistVariables = true, group = selectedRequestGroup.value) {
+async function buildInput(source, variables, persistVariables = true, group = selectedRequestGroup.value, environmentId = workspace.activeEnvironmentId) {
   const { runPreRequest } = await import("./services/postmanSandbox");
   const execution = await runPreRequest({
     script: resolvePreScript(group, variables),
@@ -2197,7 +2359,7 @@ async function buildInput(source, variables = cloneData(workspace.variables), pe
     onConsole: (entry) => appendConsole({ phase: "pre", ...entry }),
     onRequest: (request) => sendSandboxRequest(request, variables),
   });
-  if (persistVariables) applyScriptVariables(execution.variables);
+  if (persistVariables) applyScriptVariables(execution.variables, environmentId);
   return {
     input: prepareInput(execution.request, variablesMapFrom(execution.variables)),
     request: execution.request,
@@ -2205,12 +2367,13 @@ async function buildInput(source, variables = cloneData(workspace.variables), pe
   };
 }
 
-async function executeRequestLifecycle(source, group, variables = cloneData(workspace.variables), persistVariables = true, overrides = {}) {
-  let currentVariables = batchVariables(overrides, variables);
+async function executeRequestLifecycle(source, group, variables, persistVariables = true, overrides = {}, environmentId = workspace.activeEnvironmentId) {
+  const executionVariables = variables || cloneData(environmentVariables(environmentId));
+  let currentVariables = batchVariables(overrides, executionVariables);
   let result;
   let retryCount = 0;
   while (true) {
-    const execution = await buildInput(source, currentVariables, persistVariables, group);
+    const execution = await buildInput(source, currentVariables, persistVariables, group, environmentId);
     currentVariables = execution.variables;
     appendConsole({ requestName: source.name, phase: "request", level: "info", args: [`${execution.input.method} ${execution.input.url}`] });
     result = await executeHttp(execution.input);
@@ -2220,7 +2383,15 @@ async function executeRequestLifecycle(source, group, variables = cloneData(work
       level: result.status >= 400 ? "error" : "info",
       args: [`HTTP ${result.status} ${result.statusText}`, `${result.durationMs} ms`],
     });
-    const postExecution = await runResponseScript(execution.request, result, currentVariables, persistVariables, group);
+    let postExecution;
+    try {
+      postExecution = await runResponseScript(execution.request, result, currentVariables, persistVariables, group, environmentId);
+    } catch (error) {
+      const scriptError = new Error(`Post Script 执行失败：${formatError(error)}`);
+      scriptError.phase = "post";
+      scriptError.response = result;
+      throw scriptError;
+    }
     currentVariables = postExecution.variables;
     if (!postExecution.retryRequested) break;
     if (retryCount >= 1) {
@@ -2233,7 +2404,7 @@ async function executeRequestLifecycle(source, group, variables = cloneData(work
   return result;
 }
 
-async function runResponseScript(request, result, variables = cloneData(workspace.variables), persistVariables = true, group = selectedRequestGroup.value) {
+async function runResponseScript(request, result, variables, persistVariables = true, group = selectedRequestGroup.value, environmentId = workspace.activeEnvironmentId) {
   const script = request.postScript?.trim();
   if (!script || script === defaultPostScript.trim()) return { retryRequested: false, variables };
   const { runPostResponse } = await import("./services/postmanSandbox");
@@ -2245,7 +2416,7 @@ async function runResponseScript(request, result, variables = cloneData(workspac
     onConsole: (entry) => appendConsole({ phase: "post", ...entry }),
     onRequest: (nestedRequest) => sendSandboxRequest(nestedRequest, variables),
   });
-  if (persistVariables) applyScriptVariables(execution.variables);
+  if (persistVariables) applyScriptVariables(execution.variables, environmentId);
   const next = execution.nextRequest;
   return {
     retryRequested: next === request.name || next === request.id,
@@ -2280,31 +2451,34 @@ async function sendRequest() {
   if (!selectedRequest.value) return;
   const requestId = selectedRequest.value.id;
   if (sendingRequestIds.has(requestId)) return;
-  const source = cloneData(selectedRequest.value);
+  const environmentId = workspace.activeEnvironmentId;
+  const source = applyRequestEnvironment(selectedRequest.value, environmentId);
   const group = selectedRequestGroup.value;
   sendingRequestIds.add(requestId);
   errorMessage.value = "";
   response.value = null;
   try {
-    const result = await executeRequestLifecycle(source, group);
+    const result = await executeRequestLifecycle(source, group, null, true, {}, environmentId);
     setRequestExecutionResult(requestId, result, "");
   } catch (error) {
     const message = formatError(error);
-    setRequestExecutionResult(requestId, null, message);
-    appendConsole({ requestName: source.name, phase: "request", level: "error", args: [message] });
+    setRequestExecutionResult(requestId, error?.response || null, message);
+    appendConsole({ requestName: source.name, phase: error?.phase || "request", level: "error", args: [message] });
   } finally {
     sendingRequestIds.delete(requestId);
   }
 }
 
-async function executeMcpRequest({ requestId, variables = {} }) {
+async function executeMcpRequest({ requestId, variables = {}, environmentId = workspace.activeEnvironmentId }) {
+  environmentId ||= workspace.activeEnvironmentId;
   const location = await ensureRequestVisible(requestId);
   const group = location?.group;
   const request = await loadRequestDetail(requestId);
   if (!request) throw new Error(`未找到请求：${requestId}`);
   const hasOverrides = variables && Object.keys(variables).length > 0;
-  const source = hasOverrides ? applyBatchOverrides(request, variables) : request;
-  const result = await executeRequestLifecycle(source, group, cloneData(workspace.variables), !hasOverrides, variables);
+  const environmentRequest = applyRequestEnvironment(request, environmentId);
+  const source = hasOverrides ? applyBatchOverrides(environmentRequest, variables) : environmentRequest;
+  const result = await executeRequestLifecycle(source, group, cloneData(environmentVariables(environmentId)), !hasOverrides, variables, environmentId);
   setRequestExecutionResult(requestId, result, "");
   return { response: result, scriptsExecuted: true };
 }
@@ -2395,7 +2569,7 @@ function variablesForBatchItem(item, placeholders, index) {
 function parseBatchData() {
   batchError.value = "";
   try {
-    const placeholders = requestPlaceholders(selectedRequest.value);
+    const placeholders = requestPlaceholders(applyRequestEnvironment(selectedRequest.value));
     batchPlaceholders.value = placeholders;
     if (!placeholders.length) throw new Error("当前请求中没有可替换的 {{变量}} 占位符");
     const rows = JSON.parse(selectedRequest.value.batchData);
@@ -2424,7 +2598,7 @@ function parseBatchData() {
 }
 
 function openBatchRunner() {
-  const placeholders = requestPlaceholders(selectedRequest.value);
+  const placeholders = requestPlaceholders(applyRequestEnvironment(selectedRequest.value));
   if (!placeholders.length) {
     showNotice("请先在 Query 参数或请求 Body 中添加 {{变量}} 占位符");
     return;
@@ -2451,7 +2625,8 @@ async function runBatch() {
   const rows = parseBatchData();
   if (!rows) return;
 
-  const source = cloneData(selectedRequest.value);
+  const environmentId = workspace.activeEnvironmentId;
+  const source = applyRequestEnvironment(selectedRequest.value, environmentId);
   batchResults.value = [];
   selectedBatchResultId.value = "";
   batchProgress.current = 0;
@@ -2466,15 +2641,15 @@ async function runBatch() {
     batchResults.value.push(item);
     selectedBatchResultId.value = item.id;
     try {
-      let variables = batchVariables(iteration.variables, workspace.variables);
+      let variables = batchVariables(iteration.variables, environmentVariables(environmentId));
       const iterationRequest = applyBatchOverrides(source, iteration.variables);
       let retryCount = 0;
       while (true) {
-        const execution = await buildInput(iterationRequest, variables, false, selectedRequestGroup.value);
+        const execution = await buildInput(iterationRequest, variables, false, selectedRequestGroup.value, environmentId);
         variables = execution.variables;
         appendConsole({ phase: "batch", level: "info", args: [`#${index + 1}`, `${execution.input.method} ${execution.input.url}`] });
         item.response = await executeHttp(execution.input);
-        const postExecution = await runResponseScript(execution.request, item.response, variables, false, selectedRequestGroup.value);
+        const postExecution = await runResponseScript(execution.request, item.response, variables, false, selectedRequestGroup.value, environmentId);
         variables = postExecution.variables;
         if (!postExecution.retryRequested || retryCount >= 1) break;
         retryCount += 1;
@@ -2598,6 +2773,10 @@ watch(
 );
 
 function handleKeydown(event) {
+  if (event.key === "Escape" && environmentMenuOpen.value) {
+    environmentMenuOpen.value = false;
+    return;
+  }
   if (event.key === "Escape" && confirmDialog.open) {
     resolveConfirm(false);
     return;
@@ -2703,13 +2882,13 @@ onMounted(async () => {
       mcpRuntime.port = status.port;
       stopMcpRequestListener = await listen("mcp-run-request", (event) => {
         mcpRequestQueue = mcpRequestQueue.catch(() => {}).then(async () => {
-          const { callId, requestId, variables } = event.payload;
+          const { callId, requestId, variables, environmentId } = event.payload;
           try {
-            const result = await executeMcpRequest({ requestId, variables });
+            const result = await executeMcpRequest({ requestId, variables, environmentId });
             await invoke("complete_mcp_request", { callId, result, error: null });
           } catch (error) {
             const message = formatError(error);
-            setRequestExecutionResult(requestId, null, message);
+            setRequestExecutionResult(requestId, error?.response || null, message);
             await invoke("complete_mcp_request", { callId, result: null, error: message });
           }
         });
@@ -2755,6 +2934,31 @@ onBeforeUnmount(() => {
     <header class="topbar">
       <div class="brand"><span class="brand-mark">R</span><span>Reqly</span></div>
       <div class="topbar-actions">
+        <button v-if="environmentMenuOpen && !settingsOpen" class="environment-menu-backdrop" aria-label="关闭环境菜单" @click="environmentMenuOpen = false"></button>
+        <div v-if="!settingsOpen" class="environment-switcher" :style="{ '--environment-color': activeEnvironment?.color, '--environment-text': environmentTextColor(activeEnvironment?.color) }">
+          <button class="environment-trigger" type="button" :aria-expanded="environmentMenuOpen" title="切换当前环境" @click="environmentMenuOpen = !environmentMenuOpen">
+            <Server class="environment-server-icon" :size="14" />
+            <span class="environment-current">{{ activeEnvironment?.name }}</span>
+            <ChevronDown :size="14" />
+          </button>
+          <div v-if="environmentMenuOpen" class="environment-menu" role="menu">
+            <div class="environment-menu-label">当前环境</div>
+            <button
+              v-for="environment in workspace.environments"
+              :key="environment.id"
+              type="button"
+              role="menuitemradio"
+              :aria-checked="environment.id === workspace.activeEnvironmentId"
+              :class="{ active: environment.id === workspace.activeEnvironmentId }"
+              :style="{ '--environment-color': environment.color, '--environment-text': environmentTextColor(environment.color) }"
+              @click="workspace.activeEnvironmentId = environment.id; environmentMenuOpen = false"
+            >
+              <Server class="environment-server-icon" :size="14" />
+              <span class="environment-option-name">{{ environment.name }}</span>
+              <Check v-if="environment.id === workspace.activeEnvironmentId" :size="14" />
+            </button>
+          </div>
+        </div>
         <span class="save-status" :class="saveState">
           <Check v-if="saveState === 'saved'" :size="14" />
           <Save v-else :size="14" />
@@ -2762,7 +2966,7 @@ onBeforeUnmount(() => {
         </span>
         <button class="icon-button console-toggle" title="全局 Console" @click="toggleConsole"><Terminal :size="18" /><span v-if="consoleUnread">{{ consoleUnread }}</span></button>
         <button class="icon-button" title="管理 Pre Script 模板" @click="openPreScriptTemplateManager"><Code2 :size="18" /></button>
-        <button class="icon-button" title="代理与环境变量" @click="settingsOpen = true"><Settings2 :size="18" /></button>
+        <button class="icon-button" title="代理与环境变量" @click="openSettings"><Settings2 :size="18" /></button>
       </div>
     </header>
     <div v-if="updateNoticeVisible" class="app-update-notice" role="status">
@@ -2976,7 +3180,7 @@ onBeforeUnmount(() => {
               :key="`template-${selectedPreScriptProfile.id}-${workspace.appearance.mode}`"
               v-model="selectedPreScriptProfile.script"
               :theme="workspace.appearance.mode"
-              :variables="workspace.variables"
+              :variables="activeEnvironmentVariables"
             />
           </section>
           <div v-else class="profile-empty"><Code2 :size="22" /><strong>还没有 Pre Script 模板</strong><span>新建模板后可由不同分组引用</span></div>
@@ -3078,19 +3282,21 @@ onBeforeUnmount(() => {
               <div v-for="(item, index) in activeTab === 'params' ? selectedRequest.params : selectedRequest.headers" :key="item.id" class="kv-row">
                 <input v-model="item.enabled" type="checkbox" aria-label="启用" @change="activeTab === 'params' && syncUrlFromParams(selectedRequest)" />
                 <input v-model="item.key" :data-row-key="item.id" placeholder="键" @input="activeTab === 'params' && syncUrlFromParams(selectedRequest)" />
-                <div v-if="activeTab === 'params'" class="kv-value-editor" :class="{ json: usesJsonEditor(item) }">
+                <div v-if="activeTab === 'params'" class="kv-value-editor" :class="{ json: usesJsonEditor(item), 'environment-overridden': hasEnvironmentValue(item), 'environment-inherited': !activeEnvironmentIsDefault && !hasEnvironmentValue(item) }">
                   <div v-if="usesJsonEditor(item)" class="kv-json-editor">
                     <ScriptEditor
-                      :key="`param-json-${item.id}-${workspace.appearance.mode}`"
-                      :model-value="item.value"
+                      :key="`param-json-${item.id}-${workspace.activeEnvironmentId}-${workspace.appearance.mode}`"
+                      :model-value="requestValue(item)"
                       language="json"
                       :theme="workspace.appearance.mode"
                       @update:model-value="updateJsonValue(item, $event, selectedRequest)"
                     />
                   </div>
-                  <textarea v-else v-model="item.value" rows="1" placeholder="值" @input="syncUrlFromParams(selectedRequest)"></textarea>
+                  <textarea v-else :value="requestValue(item)" rows="1" placeholder="值" @input="setRequestValue(item, $event.currentTarget.value); syncUrlFromParams(selectedRequest)"></textarea>
                 </div>
-                <input v-else v-model="item.value" placeholder="值" />
+                <div v-else class="kv-value-editor simple" :class="{ 'environment-overridden': hasEnvironmentValue(item), 'environment-inherited': !activeEnvironmentIsDefault && !hasEnvironmentValue(item) }">
+                  <textarea :value="requestValue(item)" rows="1" placeholder="值" @input="setRequestValue(item, $event.currentTarget.value)"></textarea>
+                </div>
                 <button class="row-action" title="删除" @click="removeRow(activeTab === 'params' ? selectedRequest.params : selectedRequest.headers, index); activeTab === 'params' && syncUrlFromParams(selectedRequest)"><X :size="14" /></button>
               </div>
               <button class="add-row" @click="addRow(activeTab === 'params' ? selectedRequest.params : selectedRequest.headers)"><Plus :size="14" />添加一行</button>
@@ -3100,6 +3306,9 @@ onBeforeUnmount(() => {
               <div class="body-toolbar">
                 <div class="segmented">
                   <button v-for="type in [{id:'none',label:'None'}, {id:'json',label:'JSON'}, {id:'form',label:'x-www-form-urlencoded'}, {id:'formdata',label:'form-data'}, {id:'text',label:'Text'}]" :key="type.id" :class="{ active: selectedRequest.bodyType === type.id }" @click="selectedRequest.bodyType = type.id; bodyFormatError = ''">{{ type.label }}</button>
+                </div>
+                <div v-if="!activeEnvironmentIsDefault && !['none', 'form', 'formdata'].includes(selectedRequest.bodyType)" class="body-environment-state" :class="{ overridden: hasBodyEnvironmentValue(selectedRequest) }">
+                  <span>{{ hasBodyEnvironmentValue(selectedRequest) ? `${activeEnvironment.name} 覆盖` : `继承 Default` }}</span>
                 </div>
                 <div v-if="selectedRequest.bodyType === 'form' || selectedRequest.bodyType === 'formdata'" class="form-toolbar-actions">
                   <button class="format-button" title="导入表单数据" @click="formImportOpen = !formImportOpen; formImportError = ''"><ClipboardPaste :size="14" />导入</button>
@@ -3126,17 +3335,17 @@ onBeforeUnmount(() => {
                 <div v-for="(item, index) in selectedRequest.bodyType === 'form' ? selectedRequest.formBody : selectedRequest.formData" :key="item.id" class="kv-row">
                   <input v-model="item.enabled" type="checkbox" aria-label="启用" />
                   <input v-model="item.key" :data-row-key="item.id" placeholder="字段名" />
-                  <div class="kv-value-editor" :class="{ json: usesJsonEditor(item) }">
+                  <div class="kv-value-editor" :class="{ json: usesJsonEditor(item), 'environment-overridden': hasEnvironmentValue(item), 'environment-inherited': !activeEnvironmentIsDefault && !hasEnvironmentValue(item) }">
                     <div v-if="usesJsonEditor(item)" class="kv-json-editor">
                       <ScriptEditor
-                        :key="`form-json-${item.id}-${workspace.appearance.mode}`"
-                        :model-value="item.value"
+                        :key="`form-json-${item.id}-${workspace.activeEnvironmentId}-${workspace.appearance.mode}`"
+                        :model-value="requestValue(item)"
                         language="json"
                         :theme="workspace.appearance.mode"
                         @update:model-value="updateJsonValue(item, $event)"
                       />
                     </div>
-                    <textarea v-else v-model="item.value" rows="1" placeholder="字段值"></textarea>
+                    <textarea v-else :value="requestValue(item)" rows="1" placeholder="字段值" @input="setRequestValue(item, $event.currentTarget.value)"></textarea>
                   </div>
                   <button class="row-action" title="删除" @click="removeRow(selectedRequest.bodyType === 'form' ? selectedRequest.formBody : selectedRequest.formData, index)"><X :size="14" /></button>
                 </div>
@@ -3144,12 +3353,12 @@ onBeforeUnmount(() => {
               </div>
               <ScriptEditor
                 v-else-if="selectedRequest.bodyType === 'json'"
-                :key="`body-json-${selectedRequest.id}-${workspace.appearance.mode}`"
-                v-model="selectedRequest.body"
+                :key="`body-json-${selectedRequest.id}-${workspace.activeEnvironmentId}-${workspace.appearance.mode}`"
+                v-model="activeRequestBody"
                 language="json"
                 :theme="workspace.appearance.mode"
               />
-              <textarea v-else-if="selectedRequest.bodyType !== 'none'" v-model="selectedRequest.body" spellcheck="false" placeholder="请求体" @input="bodyFormatError = ''"></textarea>
+              <textarea v-else-if="selectedRequest.bodyType !== 'none'" v-model="activeRequestBody" spellcheck="false" placeholder="请求体" @input="bodyFormatError = ''"></textarea>
               <div v-else class="empty-editor"><FileJson :size="26" /><span>此请求不发送 Body</span></div>
               <div v-if="bodyFormatError" class="body-format-error">JSON 格式错误：{{ bodyFormatError }}</div>
             </div>
@@ -3160,7 +3369,7 @@ onBeforeUnmount(() => {
                 :key="`request-post-${selectedRequest.id}-${workspace.appearance.mode}`"
                 v-model="selectedRequest.postScript"
                 :theme="workspace.appearance.mode"
-                :variables="workspace.variables"
+                :variables="activeEnvironmentVariables"
               />
             </div>
 
@@ -3313,8 +3522,20 @@ onBeforeUnmount(() => {
             </template>
           </div>
           <div class="setting-section variables-section" :class="{ collapsed: collapsedSettings.variables }">
-            <div class="setting-title"><button class="setting-title-toggle" @click="collapsedSettings.variables = !collapsedSettings.variables"><ChevronRight v-if="collapsedSettings.variables" :size="16" /><ChevronDown v-else :size="16" /><div><h3>环境变量</h3><p>支持 <code>token</code>、<code>dev.token</code>、<code>dev.wms.token</code>，最多三级</p></div></button></div>
+            <div class="setting-title"><button class="setting-title-toggle" @click="collapsedSettings.variables = !collapsedSettings.variables"><ChevronRight v-if="collapsedSettings.variables" :size="16" /><ChevronDown v-else :size="16" /><div><h3>环境变量</h3><p>在此查看和编辑变量，运行环境仅由顶部入口切换</p></div></button></div>
             <div v-if="!collapsedSettings.variables" class="variable-tree">
+              <div class="environment-manager">
+                <select v-model="settingsEnvironmentId" title="查看环境变量">
+                  <option v-for="environment in workspace.environments" :key="environment.id" :value="environment.id">{{ environment.name }}</option>
+                </select>
+                <input v-if="settingsEnvironment" v-model="settingsEnvironment.name" aria-label="环境名称" :disabled="settingsEnvironment.isDefault" />
+                <label v-if="settingsEnvironment" class="environment-color-picker" :class="{ disabled: settingsEnvironment.isDefault }" :title="settingsEnvironment.isDefault ? 'Default 背景固定为白色' : '下拉菜单背景颜色'">
+                  <input v-model="settingsEnvironment.color" type="color" aria-label="下拉菜单背景颜色" :disabled="settingsEnvironment.isDefault" />
+                </label>
+                <input v-model="environmentDraftName" placeholder="新环境名称" @keydown.enter="addEnvironment" />
+                <button title="添加环境" :disabled="!environmentDraftName.trim()" @click="addEnvironment"><Plus :size="14" /></button>
+                <button title="删除当前环境" :disabled="workspace.environments.length <= 1 || settingsEnvironment?.isDefault" @click="removeEnvironment"><Trash2 :size="14" /></button>
+              </div>
               <div class="environment-create">
                 <div class="environment-create-fields direct-variable-fields">
                   <input v-model="variableDraftKey" :class="{ invalid: variableDraftKey.trim() && !validVariableKey(variableDraftKey.trim()) }" placeholder="变量名" @keydown.enter="addDirectVariable" />
@@ -3322,7 +3543,7 @@ onBeforeUnmount(() => {
                   <button :disabled="!variableDraftKey.trim() || !validVariableKey(variableDraftKey.trim())" @click="addDirectVariable"><Plus :size="14" />添加变量</button>
                 </div>
               </div>
-              <div class="namespace-row root"><span>全局</span></div>
+              <div class="namespace-row root"><span>{{ settingsEnvironment?.name }}</span></div>
               <div v-for="item in variableHierarchy.roots" :key="item.id" class="kv-row variable-row level-0">
                 <input v-model="item.enabled" type="checkbox" aria-label="启用" />
                 <input :value="item.key" :class="{ invalid: !validVariableKey(item.key) }" placeholder="变量名" @change="renameVariableKey(item, $event.target.value)" />

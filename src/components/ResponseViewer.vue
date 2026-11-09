@@ -81,6 +81,10 @@ const responseFormatLabel = computed(() => ({
   text: "Text",
 }[responseFormat.value]));
 const requestHeaders = computed(() => props.response?.requestHeaders || []);
+const displayedErrorMessage = computed(() => props.response
+  ? props.errorMessage.replace(/^Post Script 执行失败[：:]\s*/, "")
+  : props.errorMessage,
+);
 const jsonHasContainers = computed(() =>
   parsedResponseJson.value.valid
     && parsedResponseJson.value.value !== null
@@ -190,7 +194,8 @@ watch(
         <button class="icon-button small" :title="isFullscreen ? '退出全屏' : '全屏查看'" @click="isFullscreen = !isFullscreen"><Minimize2 v-if="isFullscreen" :size="15" /><Maximize2 v-else :size="15" /></button>
       </div>
     </div>
-    <div v-if="errorMessage" class="error-state"><strong>请求失败</strong><span>{{ errorMessage }}</span></div>
+    <div v-if="errorMessage && response" class="script-error-state"><strong>Post Script 执行失败</strong><span>{{ displayedErrorMessage }}</span></div>
+    <div v-if="errorMessage && !response" class="error-state"><strong>请求失败</strong><span>{{ displayedErrorMessage }}</span></div>
     <template v-else-if="response">
       <div v-if="activeTab === 'body' && responseFormat === 'json' && parsedResponseJson.valid" class="response-json-tree">
         <div v-for="row in jsonRows" :key="row.id" class="json-tree-row" :style="{ paddingLeft: `${12 + row.depth * 18}px` }">

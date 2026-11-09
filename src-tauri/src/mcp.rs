@@ -135,7 +135,8 @@ impl McpManager {
         let payload = json!({
             "callId": call_id,
             "requestId": request_id,
-            "variables": arguments.get("variables").cloned().unwrap_or_else(|| json!({}))
+            "variables": arguments.get("variables").cloned().unwrap_or_else(|| json!({})),
+            "environmentId": arguments.get("environmentId").cloned().unwrap_or(Value::Null)
         });
         if let Err(error) = app.emit("mcp-run-request", payload) {
             self.pending_requests.lock().await.remove(&call_id);
@@ -187,7 +188,8 @@ async fn handle_post(
         "initialize" => Ok(json!({
             "protocolVersion": negotiated_protocol_version(&message),
             "capabilities": { "tools": { "listChanged": false } },
-            "serverInfo": { "name": "reqly", "version": env!("CARGO_PKG_VERSION") }
+            "serverInfo": { "name": "reqly", "version": env!("CARGO_PKG_VERSION") },
+            "instructions": "Environment workflow: before running requests in a named environment, call reqly_list_environments, select the exact returned environment ID without guessing, call reqly_switch_environment once, then call reqly_run_request without environmentId. The active environment persists for subsequent runs until explicitly switched again. If the requested environment name is missing or ambiguous, ask the user instead of choosing an ID."
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tool_definitions() })),
@@ -235,6 +237,20 @@ fn tool_definitions() -> Vec<Value> {
             "name": "reqly_list_collections",
             "description": "List Reqly collections and requests with their IDs, methods, and URLs.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        }),
+        json!({
+            "name": "reqly_list_environments",
+            "description": "List Reqly workspace environments and the active environment ID. Call this before switching environments; environment IDs must come from this result and must never be guessed.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        }),
+        json!({
+            "name": "reqly_switch_environment",
+            "description": "Switch Reqly's active workspace environment using an exact ID returned by reqly_list_environments. Call once when the desired environment changes. Subsequent reqly_run_request calls should omit environmentId and use this active environment.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "environmentId": { "type": "string", "minLength": 1 } },
+                "required": ["environmentId"], "additionalProperties": false
+            }
         }),
         json!({
             "name": "reqly_create_collection",
@@ -373,11 +389,12 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "reqly_run_request",
-            "description": "Run a saved Reqly request through the same execution pipeline as the Reqly UI, including workspace variables and Pre-request/Post-response scripts. Optional variables override workspace values for this run.",
+            "description": "Run a saved Reqly request through the same execution pipeline as the Reqly UI, including environment variables and Pre-request/Post-response scripts. Normally omit environmentId: first use reqly_list_environments and reqly_switch_environment, then this tool uses the persisted active environment. environmentId remains available only for an explicit one-off override. Optional variables override environment values for this run.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "requestId": { "type": "string" },
+                    "environmentId": { "type": "string" },
                     "variables": { "type": "object", "additionalProperties": true }
                 },
                 "required": ["requestId"], "additionalProperties": false
@@ -393,11 +410,16 @@ async fn call_tool(state: &McpState, params: Value) -> Result<Value, (i64, Strin
         .cloned()
         .unwrap_or_else(|| json!({}));
     let _mutation_guard = match name {
-        "reqly_list_collections" | "reqly_list_script_templates" | "reqly_run_request" => None,
+        "reqly_list_collections"
+        | "reqly_list_environments"
+        | "reqly_list_script_templates"
+        | "reqly_run_request" => None,
         _ => Some(state.manager.workspace_mutations.lock().await),
     };
     let result = match name {
         "reqly_list_collections" => list_collections(&state.app),
+        "reqly_list_environments" => list_environments(&state.app),
+        "reqly_switch_environment" => switch_environment(&state.app, &arguments),
         "reqly_create_collection" => create_collection(&state.app, &arguments),
         "reqly_create_subgroup" => create_subgroup(&state.app, &arguments),
         "reqly_create_request" => create_request(&state.app, &arguments),
@@ -484,6 +506,50 @@ fn list_collections(app: &AppHandle) -> Result<Value, String> {
         })
         .collect::<Vec<_>>();
     Ok(json!({ "collections": collections }))
+}
+
+fn list_environments(app: &AppHandle) -> Result<Value, String> {
+    let workspace = load_workspace(app)?;
+    let environments = workspace["environments"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|environment| {
+            json!({
+                "id": environment["id"], "name": environment["name"], "color": environment["color"]
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(
+        json!({ "environments": environments, "activeEnvironmentId": workspace["activeEnvironmentId"] }),
+    )
+}
+
+fn switch_environment(app: &AppHandle, arguments: &Value) -> Result<Value, String> {
+    let environment_id = required_string(arguments, "environmentId")?;
+    let mut workspace = load_workspace(app)?;
+    let environment = workspace["environments"]
+        .as_array()
+        .and_then(|environments| {
+            environments
+                .iter()
+                .find(|environment| environment["id"].as_str() == Some(environment_id.as_str()))
+        })
+        .cloned()
+        .ok_or_else(|| format!("Environment not found: {environment_id}"))?;
+    let changed = workspace["activeEnvironmentId"].as_str() != Some(environment_id.as_str());
+    if changed {
+        workspace["activeEnvironmentId"] = Value::String(environment_id.clone());
+        save_workspace(app, &workspace)?;
+    }
+    Ok(json!({
+        "activeEnvironmentId": environment_id,
+        "changed": changed,
+        "environment": {
+            "id": environment["id"], "name": environment["name"], "color": environment["color"]
+        }
+    }))
 }
 
 fn list_script_templates(app: &AppHandle) -> Result<Value, String> {

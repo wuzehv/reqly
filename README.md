@@ -41,6 +41,8 @@ The server listens on `0.0.0.0`, so local clients can use `127.0.0.1` and LAN cl
 Available tools:
 
 - `reqly_list_collections`: list collections and saved requests
+- `reqly_list_environments`: list environment summaries and the active environment ID
+- `reqly_switch_environment`: switch the active workspace environment used by subsequent request runs
 - `reqly_create_collection`: create a collection
 - `reqly_create_subgroup`: create a second-level group that inherits its parent collection Pre-request script
 - `reqly_create_request`: create a request in a collection or subgroup with Query parameters, headers, JSON/Text/Form body, and an optional Post-response script
@@ -50,9 +52,11 @@ Available tools:
 - `reqly_create_script_template`: create a reusable Pre Script template
 - `reqly_update_script_template`: update a Pre Script template name or JavaScript
 - `reqly_bind_script_template`: bind or unbind a template on a top-level collection and configure placeholder sources
-- `reqly_run_request`: run a saved request with optional workspace-variable overrides
+- `reqly_run_request`: run a saved request with an optional `environmentId` and per-run variable overrides; without an ID it uses the active environment
 
-The MCP server is accessible on the local network and does not currently require authentication. Use a trusted network and restrict access with the system firewall. Browser origins other than localhost are rejected. Saved requests run through Reqly's normal execution pipeline, including workspace variables, Pre-request scripts, Post-response scripts, retries, and supported body types.
+For environment-specific runs, MCP clients are instructed to call `reqly_list_environments`, switch once with `reqly_switch_environment`, and then call `reqly_run_request` without `environmentId`. Environment IDs must come from the list result and must not be guessed.
+
+The MCP server is accessible on the local network and does not currently require authentication. Use a trusted network and restrict access with the system firewall. Browser origins other than localhost are rejected. Saved requests run through Reqly's normal execution pipeline, including environment variables, Pre-request scripts, Post-response scripts, retries, and supported body types.
 
 ## Local Storage
 
