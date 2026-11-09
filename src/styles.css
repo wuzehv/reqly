@@ -334,8 +334,11 @@ input[type="checkbox"] { width: 13px; height: 13px; margin: 0 0 0 5px; accent-co
 .error-state { align-items: flex-start; justify-content: flex-start; gap: 7px; margin: 16px 20px; padding: 13px 15px; border-left: 3px solid var(--red); background: rgba(239, 111, 114, .07); color: #b3b6bb; font: 13px/1.5 var(--font-mono); }
 .error-state strong { color: var(--red); font-family: inherit; }
 .script-error-state { min-height: 36px; flex: 0 0 auto; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid color-mix(in srgb, var(--red) 32%, var(--line)); padding: 6px 14px; color: #7b4547; background: color-mix(in srgb, var(--red) 8%, var(--panel)); font-size: 12px; }
-.script-error-state strong { flex: 0 0 auto; color: var(--red); }
+.script-error-state > svg, .script-error-state strong { flex: 0 0 auto; color: var(--red); }
 .script-error-state span { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.pre-script-warning-state { min-height: 36px; flex: 0 0 auto; display: flex; align-items: center; gap: 7px; border-bottom: 1px solid color-mix(in srgb, var(--yellow) 38%, var(--line)); padding: 6px 14px; color: #70531e; background: color-mix(in srgb, var(--yellow) 9%, var(--panel)); font-size: 12px; }
+.pre-script-warning-state > svg, .pre-script-warning-state strong { flex: 0 0 auto; color: var(--yellow); }
+.pre-script-warning-state span { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .no-selection { gap: 9px; background: var(--panel); color: #70767f; font-size: 13px; }
 .no-selection strong { color: #c5c8cc; font-size: 16px; }
 .empty-logo { width: 40px; height: 40px; border-radius: 8px; margin-bottom: 4px; font-size: 22px; }

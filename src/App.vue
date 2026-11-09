@@ -2200,17 +2200,21 @@ function setVariableRow(rows, key, value, enabled = true) {
 function resolvePreScript(group, variables) {
   const collection = parentCollectionForGroup(group);
   const profile = effectivePreScriptProfile(collection);
-  if (!profile) return "";
+  if (!profile) return { script: "", warnings: [] };
   const values = variablesMapFrom(variables);
+  const warnings = [];
   const bindings = new Map((collection.preScriptPlaceholders || []).map((binding) => [binding.name, binding]));
-  return transformPreScriptPlaceholders(profile.script, (name) => {
+  const script = transformPreScriptPlaceholders(profile.script, (name) => {
     const binding = bindings.get(name) || { name, sourceType: "variable", source: name };
     if (binding.sourceType === "literal") return binding.source ?? "";
-    if (!Object.prototype.hasOwnProperty.call(values, binding.source)) {
-      throw new Error(`占位符 ${name} 引用的环境变量不存在：${binding.source}`);
+    const value = values[binding.source];
+    if (!Object.prototype.hasOwnProperty.call(values, binding.source) || String(value ?? "").trim() === "") {
+      warnings.push(`占位符 ${name} 的环境变量 ${binding.source} 不存在或为空`);
+      return "";
     }
-    return values[binding.source] ?? "";
+    return value;
   });
+  return { script, warnings: [...new Set(warnings)] };
 }
 
 function batchVariables(overrides, baseVariables = activeEnvironmentVariables.value) {
@@ -2352,8 +2356,9 @@ function applyScriptVariables(variables, environmentId) {
 
 async function buildInput(source, variables, persistVariables = true, group = selectedRequestGroup.value, environmentId = workspace.activeEnvironmentId) {
   const { runPreRequest } = await import("./services/postmanSandbox");
+  const resolvedPreScript = resolvePreScript(group, variables);
   const execution = await runPreRequest({
-    script: resolvePreScript(group, variables),
+    script: resolvedPreScript.script,
     request: cloneData(source),
     variables,
     onConsole: (entry) => appendConsole({ phase: "pre", ...entry }),
@@ -2364,6 +2369,7 @@ async function buildInput(source, variables, persistVariables = true, group = se
     input: prepareInput(execution.request, variablesMapFrom(execution.variables)),
     request: execution.request,
     variables: execution.variables,
+    warnings: resolvedPreScript.warnings,
   };
 }
 
@@ -2372,11 +2378,17 @@ async function executeRequestLifecycle(source, group, variables, persistVariable
   let currentVariables = batchVariables(overrides, executionVariables);
   let result;
   let retryCount = 0;
+  const scriptWarnings = new Set();
   while (true) {
     const execution = await buildInput(source, currentVariables, persistVariables, group, environmentId);
+    execution.warnings.forEach((warning) => {
+      if (!scriptWarnings.has(warning)) appendConsole({ requestName: source.name, phase: "pre", level: "warn", args: [warning] });
+      scriptWarnings.add(warning);
+    });
     currentVariables = execution.variables;
     appendConsole({ requestName: source.name, phase: "request", level: "info", args: [`${execution.input.method} ${execution.input.url}`] });
     result = await executeHttp(execution.input);
+    if (scriptWarnings.size) result.scriptWarnings = [...scriptWarnings];
     appendConsole({
       requestName: source.name,
       phase: "response",

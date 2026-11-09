@@ -1,12 +1,14 @@
 <script setup>
 import { computed, reactive, ref, watch } from "vue";
 import {
+  AlertTriangle,
   ArrowDownLeft,
   ArrowUpRight,
   Braces,
   Check,
   ChevronDown,
   ChevronRight,
+  CircleX,
   Clock3,
   Copy,
   Gauge,
@@ -81,6 +83,7 @@ const responseFormatLabel = computed(() => ({
   text: "Text",
 }[responseFormat.value]));
 const requestHeaders = computed(() => props.response?.requestHeaders || []);
+const scriptWarnings = computed(() => props.response?.scriptWarnings || []);
 const displayedErrorMessage = computed(() => props.response
   ? props.errorMessage.replace(/^Post Script 执行失败[：:]\s*/, "")
   : props.errorMessage,
@@ -194,7 +197,8 @@ watch(
         <button class="icon-button small" :title="isFullscreen ? '退出全屏' : '全屏查看'" @click="isFullscreen = !isFullscreen"><Minimize2 v-if="isFullscreen" :size="15" /><Maximize2 v-else :size="15" /></button>
       </div>
     </div>
-    <div v-if="errorMessage && response" class="script-error-state"><strong>Post Script 执行失败</strong><span>{{ displayedErrorMessage }}</span></div>
+    <div v-if="scriptWarnings.length" class="pre-script-warning-state" :title="scriptWarnings.join('\n')"><AlertTriangle :size="14" /><strong>Pre Script 环境变量警告</strong><span>{{ scriptWarnings.join('；') }}</span></div>
+    <div v-if="errorMessage && response" class="script-error-state"><CircleX :size="14" /><strong>Post Script 执行失败</strong><span>{{ displayedErrorMessage }}</span></div>
     <div v-if="errorMessage && !response" class="error-state"><strong>请求失败</strong><span>{{ displayedErrorMessage }}</span></div>
     <template v-else-if="response">
       <div v-if="activeTab === 'body' && responseFormat === 'json' && parsedResponseJson.valid" class="response-json-tree">
