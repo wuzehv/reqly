@@ -7,7 +7,7 @@ import { json } from "@codemirror/lang-json";
 import { xml } from "@codemirror/lang-xml";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { EditorState } from "@codemirror/state";
-import { EditorView } from "@codemirror/view";
+import { Decoration, EditorView, MatchDecorator, ViewPlugin } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
 import { oneDark } from "@codemirror/theme-one-dark";
 import { basicSetup } from "codemirror";
@@ -17,8 +17,19 @@ const props = defineProps({
   language: { type: String, default: "text" },
   theme: { type: String, default: "light" },
 });
+const emit = defineEmits(["url-click"]);
 const host = ref(null);
 let view;
+const urlMatcher = new MatchDecorator({
+  regexp: /https?:\/\/[^\s<>"'`]*[^\s<>"'`.,;:!?)}\]]/g,
+  decoration: Decoration.mark({ class: "cm-response-url" }),
+});
+const urlPlugin = ViewPlugin.define((editor) => ({
+  decorations: urlMatcher.createDeco(editor),
+  update(update) {
+    this.decorations = urlMatcher.updateDeco(update, this.decorations);
+  },
+}), { decorations: (plugin) => plugin.decorations });
 
 const lightHighlight = HighlightStyle.define([
   { tag: [tags.tagName, tags.typeName, tags.className], color: "#7952a8" },
@@ -61,6 +72,15 @@ onMounted(() => {
         languageExtension(props.language),
         ...(dark ? [oneDark] : [syntaxHighlighting(lightHighlight)]),
         EditorView.lineWrapping,
+        urlPlugin,
+        EditorView.domEventHandlers({
+          click(event) {
+            const target = event.target instanceof Element ? event.target.closest(".cm-response-url") : null;
+            if (!target) return false;
+            emit("url-click", { url: target.textContent, x: event.clientX, y: event.clientY });
+            return true;
+          },
+        }),
         EditorView.theme({
           "&": { height: "100%", color: dark ? "#d7dce1" : "#29343c", backgroundColor: dark ? "#202327" : "#f6f7f7" },
           ".cm-scroller": { fontFamily: '"Cascadia Code", "Cascadia Mono", Consolas, monospace', fontSize: "13px", lineHeight: "1.65" },
@@ -68,6 +88,7 @@ onMounted(() => {
           ".cm-gutters": { color: dark ? "#737c84" : "#8a949c", backgroundColor: dark ? "#1e2124" : "#eef1f2", borderRight: `1px solid ${dark ? "#30353a" : "#d5dde1"}` },
           ".cm-activeLine, .cm-activeLineGutter": { backgroundColor: "transparent" },
           ".cm-cursor": { display: "none" },
+          ".cm-response-url": { color: dark ? "#78b7e5" : "#1769a6", textDecoration: "underline", textUnderlineOffset: "2px", cursor: "pointer" },
         }),
       ],
     }),

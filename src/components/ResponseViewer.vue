@@ -1,5 +1,5 @@
 <script setup>
-import { computed, reactive, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import {
   AlertTriangle,
   ArrowDownLeft,
@@ -11,9 +11,11 @@ import {
   CircleX,
   Clock3,
   Copy,
+  ExternalLink,
   Gauge,
   Maximize2,
   Minimize2,
+  Plus,
 } from "@lucide/vue";
 import ResponseCodeViewer from "./ResponseCodeViewer.vue";
 
@@ -25,9 +27,11 @@ const props = defineProps({
   emptyText: { type: String, default: "发送请求后，结果会显示在这里" },
   theme: { type: String, default: "light" },
 });
-const emit = defineEmits(["update:tab", "update:fullscreen"]);
+const emit = defineEmits(["update:tab", "update:fullscreen", "create-request-from-url", "open-url"]);
 const copied = ref(false);
 const collapsedJsonPaths = reactive({});
+const urlMenu = reactive({ open: false, url: "", top: 0, left: 0 });
+const responseUrlPattern = /https?:\/\/[^\s<>"'`]*[^\s<>"'`.,;:!?)}\]]/g;
 
 const activeTab = computed({
   get: () => props.tab,
@@ -127,6 +131,45 @@ function jsonValueClass(value) {
   return `json-${typeof value}`;
 }
 
+function jsonValueSegments(value) {
+  const text = JSON.stringify(value);
+  const segments = [];
+  let cursor = 0;
+  for (const match of text.matchAll(responseUrlPattern)) {
+    if (match.index > cursor) segments.push({ type: "text", text: text.slice(cursor, match.index) });
+    segments.push({ type: "url", text: match[0] });
+    cursor = match.index + match[0].length;
+  }
+  if (cursor < text.length) segments.push({ type: "text", text: text.slice(cursor) });
+  return segments;
+}
+
+function showUrlMenu({ url, x, y }) {
+  urlMenu.url = url;
+  urlMenu.left = Math.max(8, Math.min(x, window.innerWidth - 210));
+  urlMenu.top = Math.max(8, Math.min(y, window.innerHeight - 92));
+  urlMenu.open = true;
+}
+
+function showJsonUrlMenu(event, url) {
+  event.stopPropagation();
+  showUrlMenu({ url, x: event.clientX, y: event.clientY });
+}
+
+function createRequestFromUrl() {
+  emit("create-request-from-url", urlMenu.url);
+  urlMenu.open = false;
+}
+
+function openUrl() {
+  emit("open-url", urlMenu.url);
+  urlMenu.open = false;
+}
+
+function handleEscape(event) {
+  if (event.key === "Escape") urlMenu.open = false;
+}
+
 function toggleJsonPath(path) {
   collapsedJsonPaths[path] = !collapsedJsonPaths[path];
 }
@@ -177,6 +220,9 @@ watch(
   () => props.response?.body,
   () => Object.keys(collapsedJsonPaths).forEach((path) => delete collapsedJsonPaths[path]),
 );
+
+onMounted(() => window.addEventListener("keydown", handleEscape));
+onBeforeUnmount(() => window.removeEventListener("keydown", handleEscape));
 </script>
 
 <template>
@@ -209,13 +255,21 @@ watch(
             <template v-if="row.collapsed"><span class="json-ellipsis"> … </span><span class="json-bracket">{{ row.array ? ']' : '}' }}{{ row.last ? '' : ',' }}</span></template><span class="json-count">{{ row.count }} {{ row.array ? '项' : '字段' }}</span>
           </template>
           <template v-else-if="row.kind === 'close'"><span class="json-close-spacer"></span><span class="json-bracket">{{ row.array ? ']' : '}' }}{{ row.last ? '' : ',' }}</span></template>
-          <template v-else><span class="json-close-spacer"></span><span v-if="row.key !== null" class="json-key">{{ JSON.stringify(row.key) }}: </span><span :class="jsonValueClass(row.value)">{{ jsonValueText(row.value) }}</span><span>{{ row.last ? '' : ',' }}</span></template>
+          <template v-else><span class="json-close-spacer"></span><span v-if="row.key !== null" class="json-key">{{ JSON.stringify(row.key) }}: </span><span v-if="typeof row.value === 'string'" class="json-string"><template v-for="(segment, index) in jsonValueSegments(row.value)" :key="index"><button v-if="segment.type === 'url'" class="response-url-link" @click.stop="showJsonUrlMenu($event, segment.text)">{{ segment.text }}</button><span v-else>{{ segment.text }}</span></template></span><span v-else :class="jsonValueClass(row.value)">{{ jsonValueText(row.value) }}</span><span>{{ row.last ? '' : ',' }}</span></template>
         </div>
       </div>
-      <ResponseCodeViewer v-else-if="activeTab === 'body'" :key="`${responseFormat}-${theme}`" :content="displayedResponseBody" :language="responseFormat" :theme="theme" />
+      <ResponseCodeViewer v-else-if="activeTab === 'body'" :key="`${responseFormat}-${theme}`" :content="displayedResponseBody" :language="responseFormat" :theme="theme" @url-click="showUrlMenu" />
       <div v-else-if="activeTab === 'request-headers'" class="response-headers"><div v-for="([key, value], index) in requestHeaders" :key="`${key}-${index}`"><strong>{{ key }}</strong><span>{{ value }}</span></div></div>
       <div v-else class="response-headers"><div v-for="([key, value], index) in response.headers" :key="`${key}-${index}`"><strong>{{ key }}</strong><span>{{ value }}</span></div></div>
     </template>
     <div v-else class="response-empty"><Braces :size="30" /><strong>等待响应</strong><span>{{ emptyText }}</span></div>
+    <Teleport to="body">
+      <button v-if="urlMenu.open" class="response-url-backdrop" aria-label="关闭 URL 操作菜单" @click="urlMenu.open = false"></button>
+      <div v-if="urlMenu.open" class="response-url-menu" :class="`theme-${theme}`" :style="{ top: `${urlMenu.top}px`, left: `${urlMenu.left}px` }">
+        <div :title="urlMenu.url">{{ urlMenu.url }}</div>
+        <button @click="createRequestFromUrl"><Plus :size="14" />创建接口</button>
+        <button @click="openUrl"><ExternalLink :size="14" />浏览器打开</button>
+      </div>
+    </Teleport>
   </section>
 </template>

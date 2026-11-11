@@ -285,8 +285,8 @@ fn tool_definitions() -> Vec<Value> {
                     "url": { "type": "string", "minLength": 1 },
                     "params": { "type": "object", "additionalProperties": { "type": ["string", "number", "boolean", "null"] } },
                     "headers": { "type": "object", "additionalProperties": { "type": ["string", "number", "boolean", "null"] } },
-                    "bodyType": { "type": "string", "enum": ["none", "json", "text", "form"] },
-                    "body": { "description": "Raw JSON/text body, or an object for form body" },
+                    "bodyType": { "type": "string", "enum": ["none", "json", "text", "binary", "form"] },
+                    "body": { "description": "Raw JSON/text body, a local file path for binary body, or an object for form body" },
                     "postScript": { "type": "string", "description": "Optional Post-response JavaScript for this request." }
                 },
                 "required": ["collectionId", "name", "method", "url"],
@@ -371,8 +371,8 @@ fn tool_definitions() -> Vec<Value> {
                     "url": { "type": "string", "minLength": 1, "pattern": "\\S" },
                     "params": { "type": "object", "additionalProperties": { "type": ["string", "number", "boolean", "null"] } },
                     "headers": { "type": "object", "additionalProperties": { "type": ["string", "number", "boolean", "null"] } },
-                    "bodyType": { "type": "string", "enum": ["none", "json", "text", "form"] },
-                    "body": { "description": "Raw JSON/text body, or an object for form body" },
+                    "bodyType": { "type": "string", "enum": ["none", "json", "text", "binary", "form"] },
+                    "body": { "description": "Raw JSON/text body, a local file path for binary body, or an object for form body" },
                     "postScript": { "type": "string" },
                     "pinned": { "type": "boolean" },
                     "archived": { "type": "boolean" }
@@ -785,7 +785,7 @@ fn create_request(app: &AppHandle, arguments: &Value) -> Result<Value, String> {
         .get("bodyType")
         .and_then(Value::as_str)
         .unwrap_or("none");
-    if !["none", "json", "text", "form"].contains(&body_type) {
+    if !["none", "json", "text", "binary", "form"].contains(&body_type) {
         return Err(format!("Unsupported bodyType: {body_type}"));
     }
     let params = pairs_from_object(arguments.get("params"));
@@ -805,14 +805,15 @@ fn create_request(app: &AppHandle, arguments: &Value) -> Result<Value, String> {
     };
     let bodies = json!({
         "json": if body_type == "json" { body.clone() } else { String::new() },
-        "text": if body_type == "text" { body.clone() } else { String::new() }
+        "text": if body_type == "text" { body.clone() } else { String::new() },
+        "binary": if body_type == "binary" { body.clone() } else { String::new() }
     });
     let request = json!({
         "id": Uuid::new_v4().to_string(), "name": name, "method": method, "url": url,
         "params": if params.is_empty() { vec![empty_pair()] } else { params },
         "headers": headers, "bodyType": body_type, "body": body, "formBody": form_body,
         "bodies": bodies,
-        "bodyEnvironmentValues": { "json": {}, "text": {} },
+        "bodyEnvironmentValues": { "json": {}, "text": {}, "binary": {} },
         "formData": [empty_pair()],
         "postScript": post_script,
         "batchData": "",
@@ -897,11 +898,11 @@ fn update_request(app: &AppHandle, arguments: &Value) -> Result<Value, String> {
     }
     if let Some(value) = arguments.get("bodyType") {
         let body_type = value.as_str().ok_or("bodyType must be a string")?;
-        if !["none", "json", "text", "form"].contains(&body_type) {
+        if !["none", "json", "text", "binary", "form"].contains(&body_type) {
             return Err(format!("Unsupported bodyType: {body_type}"));
         }
         request["bodyType"] = Value::String(body_type.to_string());
-        request["body"] = if body_type == "json" || body_type == "text" {
+        request["body"] = if body_type == "json" || body_type == "text" || body_type == "binary" {
             request["bodies"][body_type].clone()
         } else {
             Value::String(String::new())
@@ -918,7 +919,7 @@ fn update_request(app: &AppHandle, arguments: &Value) -> Result<Value, String> {
             let body = value_as_body(Some(value));
             request["body"] = Value::String(body.clone());
             if let Some(body_type) = request["bodyType"].as_str().map(str::to_string) {
-                if body_type == "json" || body_type == "text" {
+                if body_type == "json" || body_type == "text" || body_type == "binary" {
                     request["bodies"][&body_type] = Value::String(body);
                 }
             }
@@ -954,7 +955,7 @@ fn ensure_request_body_storage(request: &mut Value) {
     let body_type = request["bodyType"].as_str().unwrap_or("none").to_string();
     let body = request["body"].as_str().unwrap_or_default().to_string();
     if !request["bodies"].is_object() {
-        request["bodies"] = json!({ "json": "", "text": "" });
+        request["bodies"] = json!({ "json": "", "text": "", "binary": "" });
     }
     if !request["bodies"]["json"].is_string() {
         request["bodies"]["json"] = Value::String(String::new());
@@ -962,15 +963,22 @@ fn ensure_request_body_storage(request: &mut Value) {
     if !request["bodies"]["text"].is_string() {
         request["bodies"]["text"] = Value::String(String::new());
     }
-    if body_type == "json" || body_type == "text" {
+    if !request["bodies"]["binary"].is_string() {
+        request["bodies"]["binary"] = Value::String(String::new());
+    }
+    if body_type == "json" || body_type == "text" || body_type == "binary" {
         request["bodies"][&body_type] = Value::String(body);
     }
 
     let environment_values = request["bodyEnvironmentValues"].clone();
-    let nested = environment_values["json"].is_object() || environment_values["text"].is_object();
+    let nested = environment_values["json"].is_object()
+        || environment_values["text"].is_object()
+        || environment_values["binary"].is_object();
     if !nested {
-        request["bodyEnvironmentValues"] = json!({ "json": {}, "text": {} });
-        if (body_type == "json" || body_type == "text") && environment_values.is_object() {
+        request["bodyEnvironmentValues"] = json!({ "json": {}, "text": {}, "binary": {} });
+        if (body_type == "json" || body_type == "text" || body_type == "binary")
+            && environment_values.is_object()
+        {
             request["bodyEnvironmentValues"][&body_type] = environment_values;
         }
     } else {
@@ -979,6 +987,9 @@ fn ensure_request_body_storage(request: &mut Value) {
         }
         if !request["bodyEnvironmentValues"]["text"].is_object() {
             request["bodyEnvironmentValues"]["text"] = json!({});
+        }
+        if !request["bodyEnvironmentValues"]["binary"].is_object() {
+            request["bodyEnvironmentValues"]["binary"] = json!({});
         }
     }
 }

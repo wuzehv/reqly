@@ -22,6 +22,7 @@ import {
   Download,
   FileJson,
   FileInput,
+  FileUp,
   Folder,
   FolderPlus,
   GripVertical,
@@ -54,11 +55,34 @@ function importedProfileName(name, profiles) {
 }
 const cloneData = (value) => JSON.parse(JSON.stringify(toRaw(value)));
 const pair = (key = "", value = "") => ({ id: uid(), key, value, enabled: true });
+const formDataPair = (key = "", value = "") => ({ ...pair(key, value), type: "text" });
 const defaultPreScript = "// 发送集合内的请求前运行\n// pm.environment.set(\"token\", \"your-token\");";
 const defaultPreScriptTemplate = "// 使用无引号占位符，分组可将其绑定到环境变量或固定值";
 const defaultPostScript = "// 收到响应后运行\n// if (pm.response.code === 401) { /* 刷新凭证 */ }";
 const legacyBatchData = "[\n  {\n    \"id\": 1\n  },\n  {\n    \"id\": 2\n  }\n]";
 const themeColors = ["#d65f35", "#3276c3", "#27805f", "#7654b5", "#b94b68"];
+const commonRequestHeaders = [
+  "Accept",
+  "Accept-Encoding",
+  "Accept-Language",
+  "Authorization",
+  "Cache-Control",
+  "Content-MD5",
+  "Content-Type",
+  "Cookie",
+  "If-Match",
+  "If-Modified-Since",
+  "If-None-Match",
+  "Origin",
+  "Referer",
+  "User-Agent",
+  "X-Api-Key",
+  "X-Nonce",
+  "X-Request-Id",
+  "X-Requested-With",
+  "X-Signature",
+  "X-Timestamp",
+];
 const mcpTools = [
   { name: "reqly_list_collections", description: "列出集合、子分组和请求" },
   { name: "reqly_list_environments", description: "列出环境和当前环境" },
@@ -83,10 +107,10 @@ const makeRequest = (name = "新请求", url = "") => ({
   headers: [pair("Accept", "application/json")],
   bodyType: "none",
   body: "",
-  bodies: { json: "", text: "" },
-  bodyEnvironmentValues: { json: {}, text: {} },
+  bodies: { json: "", text: "", binary: "" },
+  bodyEnvironmentValues: { json: {}, text: {}, binary: {} },
   formBody: [pair()],
-  formData: [pair()],
+  formData: [formDataPair()],
   postScript: defaultPostScript,
   batchData: "",
   batchPlaceholderNames: [],
@@ -156,6 +180,8 @@ const templateManagerRef = ref(null);
 const placeholderVariableSearch = reactive({});
 const activePlaceholderVariableMenu = ref("");
 const placeholderVariableMenuPosition = reactive({ top: 0, left: 0, width: 0 });
+const activeHeaderSuggestionRow = ref("");
+const headerSuggestionMenuPosition = reactive({ top: 0, left: 0, width: 0 });
 const scriptLogs = ref([]);
 const consoleOpen = ref(false);
 const consoleUnread = ref(0);
@@ -530,7 +556,8 @@ function normalizeRequest(request, inheritedPostScript = defaultPostScript) {
   request.body ||= "";
   normalizeRequestBodyStorage(request);
   request.formBody ||= [pair()];
-  request.formData ||= [pair()];
+  request.formData ||= [formDataPair()];
+  request.formData.forEach((item) => (item.type ||= "text"));
   request.postScript ??= inheritedPostScript || defaultPostScript;
   request.batchData ??= "";
   request.batchPlaceholderNames ??= [];
@@ -538,7 +565,7 @@ function normalizeRequest(request, inheritedPostScript = defaultPostScript) {
 }
 
 function rawBodyType(bodyType) {
-  return bodyType === "json" || bodyType === "text" ? bodyType : "";
+  return ["json", "text", "binary"].includes(bodyType) ? bodyType : "";
 }
 
 function normalizeRequestBodyStorage(request) {
@@ -548,18 +575,20 @@ function normalizeRequestBodyStorage(request) {
     : {};
   bodies.json ??= "";
   bodies.text ??= "";
+  bodies.binary ??= "";
   if (currentType) bodies[currentType] = String(request.body ?? bodies[currentType] ?? "");
   request.bodies = bodies;
 
   const source = request.bodyEnvironmentValues;
   const nested = source && typeof source === "object" && !Array.isArray(source)
-    && (["json", "text"].some((type) => source[type] && typeof source[type] === "object" && !Array.isArray(source[type])));
+    && (["json", "text", "binary"].some((type) => source[type] && typeof source[type] === "object" && !Array.isArray(source[type])));
   if (nested) {
     source.json ||= {};
     source.text ||= {};
+    source.binary ||= {};
     request.bodyEnvironmentValues = source;
   } else {
-    request.bodyEnvironmentValues = { json: {}, text: {} };
+    request.bodyEnvironmentValues = { json: {}, text: {}, binary: {} };
     if (currentType && source && typeof source === "object" && !Array.isArray(source)) {
       request.bodyEnvironmentValues[currentType] = source;
     }
@@ -750,12 +779,12 @@ function setRequestBodyValue(request, value, environmentId = workspace.activeEnv
   }
   const environment = workspace.environments.find((candidate) => candidate.id === environmentId);
   if (!environment || environment.isDefault) {
-    request.bodies ||= { json: "", text: "" };
+    request.bodies ||= { json: "", text: "", binary: "" };
     request.bodies[type] = value;
     request.body = value;
     return;
   }
-  request.bodyEnvironmentValues ||= { json: {}, text: {} };
+  request.bodyEnvironmentValues ||= { json: {}, text: {}, binary: {} };
   request.bodyEnvironmentValues[type] ||= {};
   request.bodyEnvironmentValues[type][environmentId] = value;
 }
@@ -763,13 +792,76 @@ function setRequestBodyValue(request, value, environmentId = workspace.activeEnv
 function selectBodyType(request, bodyType) {
   const previousType = rawBodyType(request.bodyType);
   if (previousType) {
-    request.bodies ||= { json: "", text: "" };
+    request.bodies ||= { json: "", text: "", binary: "" };
     request.bodies[previousType] = request.body;
   }
   request.bodyType = bodyType;
   const nextType = rawBodyType(bodyType);
   request.body = nextType ? request.bodies?.[nextType] || "" : "";
   bodyFormatError.value = "";
+  focusBodyEditor(bodyType);
+}
+
+function focusBodyEditor(bodyType) {
+  nextTick(() => {
+    const editor = document.querySelector(".body-editor");
+    if (!editor) return;
+    if (bodyType === "json") editor.querySelector(".cm-content")?.focus();
+    else if (bodyType === "text") editor.querySelector(":scope > textarea")?.focus();
+    else if (bodyType === "form" || bodyType === "formdata") editor.querySelector("[data-row-key]")?.focus();
+    else if (bodyType === "binary") editor.querySelector(".binary-file-editor button")?.focus();
+  });
+}
+
+function selectRequestTab(tabId) {
+  activeTab.value = tabId;
+  if (tabId === "body") {
+    focusBodyEditor(selectedRequest.value?.bodyType);
+    return;
+  }
+  nextTick(() => {
+    const panel = document.querySelector(".request-panel");
+    if (!panel) return;
+    if (tabId === "params" || tabId === "headers") panel.querySelector("[data-row-key]")?.focus();
+    else if (tabId === "post") panel.querySelector(".request-script-editor .cm-content")?.focus();
+  });
+}
+
+function selectedFileName(path) {
+  return String(path || "").split(/[\\/]/).filter(Boolean).at(-1) || "未选择文件";
+}
+
+function inferredContentType(path) {
+  const extension = selectedFileName(path).split(".").at(-1)?.toLowerCase();
+  return ({
+    txt: "text/plain", csv: "text/csv", html: "text/html", xml: "application/xml",
+    json: "application/json", pdf: "application/pdf", zip: "application/zip",
+    gz: "application/gzip", tar: "application/x-tar", png: "image/png",
+    jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp",
+    svg: "image/svg+xml", mp3: "audio/mpeg", wav: "audio/wav", mp4: "video/mp4",
+  })[extension] || "application/octet-stream";
+}
+
+async function chooseUploadFile() {
+  if (!isTauri()) {
+    showNotice("文件上传仅支持 Reqly 桌面端");
+    return "";
+  }
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const path = await open({ multiple: false, directory: false });
+  return typeof path === "string" ? path : "";
+}
+
+async function selectBinaryFile(request) {
+  const path = await chooseUploadFile();
+  if (path) setRequestBodyValue(request, path);
+}
+
+async function selectFormDataFile(item) {
+  const path = await chooseUploadFile();
+  if (!path) return;
+  item.type = "file";
+  setRequestValue(item, path);
 }
 
 function applyRequestEnvironment(request, environmentId = workspace.activeEnvironmentId) {
@@ -837,6 +929,60 @@ function addCollection() {
   const collection = { id: uid(), name: `新集合 ${workspace.collections.length + 1}`, expanded: true, preScriptProfileId: "", preScriptPlaceholders: [], requests: [], requestCount: 0, requestsLoaded: true, groups: [] };
   workspace.collections.push(collection);
   beginRenameCollection(collection);
+}
+
+function temporaryRequestName(url) {
+  try {
+    const parsed = new URL(url);
+    const segment = parsed.pathname.split("/").filter(Boolean).at(-1);
+    return segment ? decodeURIComponent(segment).slice(0, 80) : parsed.hostname;
+  } catch {
+    return "临时请求";
+  }
+}
+
+async function createTemporaryRequestFromUrl(url) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+    if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("仅支持 HTTP/HTTPS URL");
+  } catch (error) {
+    showNotice(`无法创建接口：${formatError(error)}`);
+    return;
+  }
+  const request = makeRequest(temporaryRequestName(url), url);
+  syncParamsFromUrl(request);
+  const timestamp = new Date().toLocaleTimeString([], { hour12: false });
+  const collection = {
+    id: uid(),
+    name: `临时接口 ${timestamp}`,
+    expanded: true,
+    archiveExpanded: false,
+    temporary: true,
+    preScriptProfileId: "",
+    preScriptPlaceholders: [],
+    requests: [request],
+    requestCount: 1,
+    requestsLoaded: true,
+    groups: [],
+  };
+  workspace.collections.push(collection);
+  cacheRequestDetail(request);
+  await changeSelectedRequest(request.id);
+  showNotice(`已创建临时接口：${request.name}`);
+}
+
+async function openResponseUrl(url) {
+  try {
+    if (isTauri()) {
+      const { openUrl } = await import("@tauri-apps/plugin-opener");
+      await openUrl(url);
+    } else {
+      window.open(url, "_blank", "noopener,noreferrer");
+    }
+  } catch (error) {
+    showNotice(`打开链接失败：${formatError(error)}`);
+  }
 }
 
 function addSubgroup(collection) {
@@ -1047,6 +1193,51 @@ function fuzzyVariableMatch(value, query) {
     }
     return true;
   });
+}
+
+function headerSuggestions(value) {
+  const query = String(value || "").trim();
+  return commonRequestHeaders
+    .filter((header) => !query || fuzzyVariableMatch(header, query))
+    .sort((left, right) => {
+      const normalized = query.toLowerCase();
+      const leftRank = left.toLowerCase().startsWith(normalized) ? 0 : left.toLowerCase().includes(normalized) ? 1 : 2;
+      const rightRank = right.toLowerCase().startsWith(normalized) ? 0 : right.toLowerCase().includes(normalized) ? 1 : 2;
+      return leftRank - rightRank || left.localeCompare(right);
+    });
+}
+
+function openHeaderSuggestions(item, event) {
+  activeHeaderSuggestionRow.value = item.id;
+  const bounds = event.currentTarget.getBoundingClientRect();
+  const menuHeight = 196;
+  headerSuggestionMenuPosition.top = window.innerHeight - bounds.bottom >= menuHeight
+    ? bounds.bottom + 3
+    : Math.max(6, bounds.top - menuHeight - 3);
+  headerSuggestionMenuPosition.left = bounds.left;
+  headerSuggestionMenuPosition.width = bounds.width;
+}
+
+function selectHeaderSuggestion(item, value) {
+  item.key = value;
+  activeHeaderSuggestionRow.value = "";
+}
+
+function selectFirstHeaderSuggestion(item) {
+  const [first] = headerSuggestions(item.key);
+  if (first) selectHeaderSuggestion(item, first);
+}
+
+function handleHeaderSuggestionEnter(item, event) {
+  if (activeTab.value !== "headers") return;
+  event.preventDefault();
+  selectFirstHeaderSuggestion(item);
+}
+
+function closeHeaderSuggestions(item) {
+  window.setTimeout(() => {
+    if (activeHeaderSuggestionRow.value === item.id) activeHeaderSuggestionRow.value = "";
+  }, 100);
 }
 
 function placeholderVariableOptions(group, name) {
@@ -1354,6 +1545,12 @@ function addRow(rows) {
   nextTick(() => document.querySelector(`[data-row-key="${item.id}"]`)?.focus());
 }
 
+function addFormDataRow(request) {
+  const item = formDataPair();
+  request.formData.push(item);
+  nextTick(() => document.querySelector(`[data-row-key="${item.id}"]`)?.focus());
+}
+
 function isStructuredJson(value) {
   if (!value?.trim()) return false;
   try {
@@ -1425,6 +1622,7 @@ function importFormData() {
   const target = selectedRequest.value.bodyType === "form"
     ? selectedRequest.value.formBody
     : selectedRequest.value.formData;
+  if (selectedRequest.value.bodyType === "formdata") rows.forEach((item) => (item.type = "text"));
   if (formImportStrategy.value === "replace") target.splice(0, target.length, ...rows);
   else target.push(...rows);
   formImportText.value = "";
@@ -1435,7 +1633,7 @@ function clearFormData() {
   const target = selectedRequest.value.bodyType === "form"
     ? selectedRequest.value.formBody
     : selectedRequest.value.formData;
-  target.splice(0, target.length, pair());
+  target.splice(0, target.length, selectedRequest.value.bodyType === "formdata" ? formDataPair() : pair());
   formImportError.value = "";
 }
 
@@ -2306,27 +2504,23 @@ function applyBatchOverrides(request, overrides) {
   return output;
 }
 
-function multipartBody(rows, variables) {
-  const boundary = `----Reqly${uid().replaceAll("-", "")}`;
-  const content = rows
-    .filter((item) => item.enabled && item.key && item.type !== "file")
-    .map((item) => {
-      const key = interpolate(item.key, variables).replaceAll('"', "%22");
-      return `--${boundary}\r\nContent-Disposition: form-data; name="${key}"\r\n\r\n${interpolate(item.value, variables)}\r\n`;
-    })
-    .join("") + `--${boundary}--\r\n`;
-  return { content, boundary };
-}
-
 function prepareInput(request, variables) {
   const resolvedUrl = interpolate(request.url, variables);
   const unresolved = [...resolvedUrl.matchAll(/\{\{\s*([^{}]+?)\s*\}\}/g)].map((match) => match[1]);
   if (unresolved.length) throw new Error(`未找到环境变量：${[...new Set(unresolved)].join("、")}`);
 
   const url = new URL(resolvedUrl);
+  let queryChanged = false;
   (request.params || [])
     .filter((item) => item.enabled && item.key)
-    .forEach((item) => url.searchParams.set(interpolate(item.key, variables), interpolate(item.value, variables)));
+    .forEach((item) => {
+      const key = interpolate(item.key, variables);
+      const value = interpolate(item.value, variables);
+      const existing = url.searchParams.getAll(key);
+      if (existing.length === 1 && existing[0] === value) return;
+      url.searchParams.set(key, value);
+      queryChanged = true;
+    });
   let headers = request.headers
     .filter((item) => item.enabled && item.key)
     .map((item) => ({ ...item, key: interpolate(item.key, variables), value: interpolate(item.value, variables) }));
@@ -2342,20 +2536,34 @@ function prepareInput(request, variables) {
           .filter((item) => item.enabled && item.key)
           .map((item) => [interpolate(item.key, variables), interpolate(item.value, variables)]),
       ).toString()
-    : request.bodyType === "none"
+    : request.bodyType === "none" || request.bodyType === "binary" || request.bodyType === "formdata"
       ? ""
       : interpolate(request.body, variables);
+  let bodyFilePath = null;
+  let multipart = [];
+  if (request.bodyType === "binary") {
+    bodyFilePath = interpolate(request.body, variables);
+    if (!headers.some((item) => item.key.toLowerCase() === "content-type")) {
+      headers.push({ id: uid(), key: "Content-Type", value: inferredContentType(bodyFilePath), enabled: true });
+    }
+  }
   if (request.bodyType === "formdata") {
-    const multipart = multipartBody(request.formData || [], variables);
-    body = multipart.content;
+    multipart = (request.formData || [])
+      .filter((item) => item.enabled && item.key)
+      .map((item) => ({
+        name: interpolate(item.key, variables),
+        value: interpolate(item.value, variables),
+        kind: item.type === "file" ? "file" : "text",
+      }));
     headers = headers.filter((item) => item.key.toLowerCase() !== "content-type");
-    headers.push({ id: uid(), key: "Content-Type", value: `multipart/form-data; boundary=${multipart.boundary}`, enabled: true });
   }
   return {
     method: request.method,
-    url: url.toString(),
+    url: queryChanged ? url.toString() : resolvedUrl,
     headers,
     body,
+    bodyFilePath,
+    multipart,
     proxy: cloneData(workspace.proxy),
   };
 }
@@ -2365,11 +2573,20 @@ async function executeHttp(input) {
   if (isTauri()) {
     result = await invoke("send_request", { input });
   } else {
+    if (input.bodyFilePath || input.multipart.some((item) => item.kind === "file")) {
+      throw new Error("文件上传仅支持 Reqly 桌面端");
+    }
     const started = performance.now();
+    const browserBody = input.multipart.length
+      ? input.multipart.reduce((form, item) => {
+          form.append(item.name, item.value);
+          return form;
+        }, new FormData())
+      : input.body;
     const response = await fetch(input.url, {
       method: input.method,
       headers: Object.fromEntries(input.headers.map((item) => [item.key, item.value])),
-      body: ["GET", "HEAD"].includes(input.method) ? undefined : input.body,
+      body: ["GET", "HEAD"].includes(input.method) ? undefined : browserBody,
     });
     const body = await response.text();
     result = {
@@ -3338,7 +3555,7 @@ onBeforeUnmount(() => {
           </div>
 
           <nav class="tabs" aria-label="请求配置">
-            <button v-for="tab in [{id:'params',label:'参数'}, {id:'headers',label:'请求头'}, {id:'body',label:'Body'}, {id:'post',label:'Post Script'}]" :key="tab.id" :class="{ active: activeTab === tab.id }" @click="activeTab = tab.id">
+            <button v-for="tab in [{id:'params',label:'参数'}, {id:'headers',label:'请求头'}, {id:'body',label:'Body'}, {id:'post',label:'Post Script'}]" :key="tab.id" :class="{ active: activeTab === tab.id }" @click="selectRequestTab(tab.id)">
               {{ tab.label }}
               <span v-if="tab.id === 'params'" class="tab-count">{{ selectedRequest.params.filter((item) => item.enabled && item.key).length }}</span>
               <span v-if="tab.id === 'headers'" class="tab-count">{{ selectedRequest.headers.filter((item) => item.enabled && item.key).length }}</span>
@@ -3350,7 +3567,28 @@ onBeforeUnmount(() => {
               <div class="kv-head"><span></span><span>KEY</span><span>VALUE</span><span></span></div>
               <div v-for="(item, index) in activeTab === 'params' ? selectedRequest.params : selectedRequest.headers" :key="item.id" class="kv-row">
                 <input v-model="item.enabled" type="checkbox" aria-label="启用" @change="activeTab === 'params' && syncUrlFromParams(selectedRequest)" />
-                <input v-model="item.key" :data-row-key="item.id" placeholder="键" @input="activeTab === 'params' && syncUrlFromParams(selectedRequest)" />
+                <input
+                  v-model="item.key"
+                  :data-row-key="item.id"
+                  autocomplete="off"
+                  placeholder="键"
+                  @focus="activeTab === 'headers' && openHeaderSuggestions(item, $event)"
+                  @input="activeTab === 'params' ? syncUrlFromParams(selectedRequest) : activeHeaderSuggestionRow = item.id"
+                  @blur="activeTab === 'headers' && closeHeaderSuggestions(item)"
+                  @keydown.enter="handleHeaderSuggestionEnter(item, $event)"
+                  @keydown.esc="activeHeaderSuggestionRow = ''"
+                />
+                <Teleport to="body">
+                  <div
+                    v-if="activeTab === 'headers' && activeHeaderSuggestionRow === item.id"
+                    class="placeholder-variable-options"
+                    :class="`theme-${workspace.appearance.mode}`"
+                    :style="{ top: `${headerSuggestionMenuPosition.top}px`, left: `${headerSuggestionMenuPosition.left}px`, width: `${headerSuggestionMenuPosition.width}px` }"
+                  >
+                    <button v-for="header in headerSuggestions(item.key)" :key="header" @mousedown.prevent="selectHeaderSuggestion(item, header)">{{ header }}</button>
+                    <span v-if="!headerSuggestions(item.key).length">没有匹配的请求头</span>
+                  </div>
+                </Teleport>
                 <div v-if="activeTab === 'params'" class="kv-value-editor" :class="{ json: usesJsonEditor(item), 'environment-overridden': hasEnvironmentValue(item), 'environment-inherited': !activeEnvironmentIsDefault && !hasEnvironmentValue(item) }">
                   <div v-if="usesJsonEditor(item)" class="kv-json-editor">
                     <ScriptEditor
@@ -3373,8 +3611,8 @@ onBeforeUnmount(() => {
 
             <div v-else-if="activeTab === 'body'" class="body-editor">
               <div class="body-toolbar">
-                <div class="segmented">
-                  <button v-for="type in [{id:'none',label:'None'}, {id:'json',label:'JSON'}, {id:'form',label:'x-www-form-urlencoded'}, {id:'formdata',label:'form-data'}, {id:'text',label:'Text'}]" :key="type.id" :class="{ active: selectedRequest.bodyType === type.id }" @click="selectBodyType(selectedRequest, type.id)">{{ type.label }}</button>
+                <div class="segmented body-type-segmented">
+                  <button v-for="type in [{id:'none',label:'None'}, {id:'json',label:'JSON'}, {id:'form',label:'x-www-form-urlencoded'}, {id:'formdata',label:'form-data'}, {id:'text',label:'Text'}, {id:'binary',label:'Binary'}]" :key="type.id" :class="{ active: selectedRequest.bodyType === type.id }" @click="selectBodyType(selectedRequest, type.id)">{{ type.label }}</button>
                 </div>
                 <div v-if="!activeEnvironmentIsDefault && !['none', 'form', 'formdata'].includes(selectedRequest.bodyType)" class="body-environment-state" :class="{ overridden: hasBodyEnvironmentValue(selectedRequest) }">
                   <span>{{ hasBodyEnvironmentValue(selectedRequest) ? `${activeEnvironment.name} 覆盖` : `继承 Default` }}</span>
@@ -3400,12 +3638,16 @@ onBeforeUnmount(() => {
                 <div v-if="formImportError" class="body-format-error">导入失败：{{ formImportError }}</div>
               </div>
               <div v-if="selectedRequest.bodyType === 'form' || selectedRequest.bodyType === 'formdata'" class="kv-editor form-editor">
-                <div class="kv-head"><span></span><span>KEY</span><span>VALUE</span><span></span></div>
-                <div v-for="(item, index) in selectedRequest.bodyType === 'form' ? selectedRequest.formBody : selectedRequest.formData" :key="item.id" class="kv-row">
+                <div class="kv-head" :class="{ 'formdata-layout': selectedRequest.bodyType === 'formdata' }"><span></span><span v-if="selectedRequest.bodyType === 'formdata'">TYPE</span><span>KEY</span><span>VALUE</span><span></span></div>
+                <div v-for="(item, index) in selectedRequest.bodyType === 'form' ? selectedRequest.formBody : selectedRequest.formData" :key="item.id" class="kv-row" :class="{ 'formdata-layout': selectedRequest.bodyType === 'formdata' }">
                   <input v-model="item.enabled" type="checkbox" aria-label="启用" />
+                  <select v-if="selectedRequest.bodyType === 'formdata'" :value="item.type || 'text'" class="formdata-type" aria-label="字段类型" @change="item.type = $event.currentTarget.value"><option value="text">Text</option><option value="file">File</option></select>
                   <input v-model="item.key" :data-row-key="item.id" placeholder="字段名" />
                   <div class="kv-value-editor" :class="{ json: usesJsonEditor(item), 'environment-overridden': hasEnvironmentValue(item), 'environment-inherited': !activeEnvironmentIsDefault && !hasEnvironmentValue(item) }">
-                    <div v-if="usesJsonEditor(item)" class="kv-json-editor">
+                    <div v-if="selectedRequest.bodyType === 'formdata' && item.type === 'file'" class="file-value-editor">
+                      <button class="file-select-action" title="选择文件" @click="selectFormDataFile(item)"><FileUp :size="14" /><span>选择文件</span></button><span class="file-selected-name" :title="requestValue(item)">{{ selectedFileName(requestValue(item)) }}</span>
+                    </div>
+                    <div v-else-if="usesJsonEditor(item)" class="kv-json-editor">
                       <ScriptEditor
                         :key="`form-json-${item.id}-${workspace.activeEnvironmentId}-${workspace.appearance.mode}`"
                         :model-value="requestValue(item)"
@@ -3418,7 +3660,12 @@ onBeforeUnmount(() => {
                   </div>
                   <button class="row-action" title="删除" @click="removeRow(selectedRequest.bodyType === 'form' ? selectedRequest.formBody : selectedRequest.formData, index)"><X :size="14" /></button>
                 </div>
-                <button class="add-row" @click="addRow(selectedRequest.bodyType === 'form' ? selectedRequest.formBody : selectedRequest.formData)"><Plus :size="14" />添加字段</button>
+                <button class="add-row" @click="selectedRequest.bodyType === 'form' ? addRow(selectedRequest.formBody) : addFormDataRow(selectedRequest)"><Plus :size="14" />添加字段</button>
+              </div>
+              <div v-else-if="selectedRequest.bodyType === 'binary'" class="binary-file-editor">
+                <button class="binary-file-icon" title="选择文件" @click="selectBinaryFile(selectedRequest)"><FileUp :size="28" /></button>
+                <div><strong>{{ selectedFileName(activeRequestBody) }}</strong><span :title="activeRequestBody">{{ activeRequestBody || '选择一个本地文件作为请求体' }}</span></div>
+                <button class="format-button" @click="selectBinaryFile(selectedRequest)"><FileUp :size="14" />选择文件</button>
               </div>
               <ScriptEditor
                 v-else-if="selectedRequest.bodyType === 'json'"
@@ -3447,7 +3694,7 @@ onBeforeUnmount(() => {
 
         <div class="request-resizer" title="拖动调整请求与响应区域高度" @pointerdown="startRequestResize" @dblclick="workspace.appearance.requestEditorHeight = 430"></div>
 
-        <ResponseViewer v-model:tab="responseTab" v-model:fullscreen="responseFullscreen" :response="response" :error-message="errorMessage" :theme="workspace.appearance.mode" />
+        <ResponseViewer v-model:tab="responseTab" v-model:fullscreen="responseFullscreen" :response="response" :error-message="errorMessage" :theme="workspace.appearance.mode" @create-request-from-url="createTemporaryRequestFromUrl" @open-url="openResponseUrl" />
       </main>
 
       <main v-else class="no-selection"><div class="empty-logo">R</div><strong>还没有请求</strong><span>从左侧分组创建请求</span></main>
@@ -3511,6 +3758,8 @@ onBeforeUnmount(() => {
               :error-message="selectedBatchResult.error"
               :theme="workspace.appearance.mode"
               empty-text="当前批次请求执行完成后，结果会显示在这里"
+              @create-request-from-url="createTemporaryRequestFromUrl"
+              @open-url="openResponseUrl"
             />
           </section>
         </div>

@@ -1,7 +1,11 @@
-use reqwest::{Method, Proxy, header::HeaderMap};
+use reqwest::{
+    Method, Proxy,
+    header::HeaderMap,
+    multipart::{Form, Part},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::BTreeSet, error::Error, fs, net::IpAddr, time::Instant};
+use std::{collections::BTreeSet, error::Error, fs, net::IpAddr, path::Path, time::Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 mod mcp;
@@ -31,7 +35,18 @@ pub(crate) struct RequestInput {
     pub(crate) url: String,
     pub(crate) headers: Vec<KeyValue>,
     pub(crate) body: String,
+    pub(crate) body_file_path: Option<String>,
+    #[serde(default)]
+    pub(crate) multipart: Vec<MultipartField>,
     pub(crate) proxy: ProxyConfig,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MultipartField {
+    name: String,
+    value: String,
+    kind: String,
 }
 
 #[derive(Serialize)]
@@ -211,8 +226,40 @@ pub(crate) async fn execute_request(input: RequestInput) -> Result<ResponseOutpu
         headers.append(name, value);
     }
 
+    if !input.multipart.is_empty() {
+        headers.remove(reqwest::header::CONTENT_TYPE);
+    }
     let mut request = client.request(method, input.url.trim()).headers(headers);
-    if !input.body.is_empty() {
+    if !input.multipart.is_empty() {
+        let mut form = Form::new();
+        for field in input.multipart {
+            if field.kind == "file" {
+                let path = field.value.trim();
+                if path.is_empty() {
+                    return Err(format!("文件字段 {} 未选择文件", field.name));
+                }
+                let bytes =
+                    fs::read(path).map_err(|error| format!("读取文件失败（{path}）：{error}"))?;
+                let file_name = Path::new(path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("file")
+                    .to_string();
+                let mime = mime_guess::from_path(path).first_or_octet_stream();
+                let part = Part::bytes(bytes)
+                    .file_name(file_name)
+                    .mime_str(mime.as_ref())
+                    .map_err(|error| format!("文件 MIME 类型无效（{path}）：{error}"))?;
+                form = form.part(field.name, part);
+            } else {
+                form = form.text(field.name, field.value);
+            }
+        }
+        request = request.multipart(form);
+    } else if let Some(path) = input.body_file_path.filter(|path| !path.trim().is_empty()) {
+        let bytes = fs::read(&path).map_err(|error| format!("读取文件失败（{path}）：{error}"))?;
+        request = request.body(bytes);
+    } else if !input.body.is_empty() {
         request = request.body(input.body);
     }
 
@@ -252,6 +299,7 @@ async fn send_request(input: RequestInput) -> Result<ResponseOutput, String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(mcp::McpManager::default())
