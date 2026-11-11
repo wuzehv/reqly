@@ -803,10 +803,16 @@ fn create_request(app: &AppHandle, arguments: &Value) -> Result<Value, String> {
         Some(Value::String(value)) => value,
         Some(_) => return Err("postScript must be a string".into()),
     };
+    let bodies = json!({
+        "json": if body_type == "json" { body.clone() } else { String::new() },
+        "text": if body_type == "text" { body.clone() } else { String::new() }
+    });
     let request = json!({
         "id": Uuid::new_v4().to_string(), "name": name, "method": method, "url": url,
         "params": if params.is_empty() { vec![empty_pair()] } else { params },
         "headers": headers, "bodyType": body_type, "body": body, "formBody": form_body,
+        "bodies": bodies,
+        "bodyEnvironmentValues": { "json": {}, "text": {} },
         "formData": [empty_pair()],
         "postScript": post_script,
         "batchData": "",
@@ -848,6 +854,7 @@ fn update_request(app: &AppHandle, arguments: &Value) -> Result<Value, String> {
     let request_id = required_string(arguments, "requestId")?;
     let mut request = storage::get_request(app, &request_id)?
         .ok_or_else(|| format!("Request not found: {request_id}"))?;
+    ensure_request_body_storage(&mut request);
 
     if let Some(value) = arguments.get("name") {
         let name = value
@@ -894,6 +901,11 @@ fn update_request(app: &AppHandle, arguments: &Value) -> Result<Value, String> {
             return Err(format!("Unsupported bodyType: {body_type}"));
         }
         request["bodyType"] = Value::String(body_type.to_string());
+        request["body"] = if body_type == "json" || body_type == "text" {
+            request["bodies"][body_type].clone()
+        } else {
+            Value::String(String::new())
+        };
     }
     if let Some(value) = arguments.get("body") {
         if request["bodyType"].as_str() == Some("form") {
@@ -903,7 +915,13 @@ fn update_request(app: &AppHandle, arguments: &Value) -> Result<Value, String> {
             request["body"] = Value::String(String::new());
             request["formBody"] = Value::Array(pairs_from_object(Some(value)));
         } else {
-            request["body"] = Value::String(value_as_body(Some(value)));
+            let body = value_as_body(Some(value));
+            request["body"] = Value::String(body.clone());
+            if let Some(body_type) = request["bodyType"].as_str().map(str::to_string) {
+                if body_type == "json" || body_type == "text" {
+                    request["bodies"][&body_type] = Value::String(body);
+                }
+            }
         }
     }
     if let Some(value) = arguments.get("postScript") {
@@ -930,6 +948,39 @@ fn update_request(app: &AppHandle, arguments: &Value) -> Result<Value, String> {
         result["syncWarning"] = Value::String(error.to_string());
     }
     Ok(result)
+}
+
+fn ensure_request_body_storage(request: &mut Value) {
+    let body_type = request["bodyType"].as_str().unwrap_or("none").to_string();
+    let body = request["body"].as_str().unwrap_or_default().to_string();
+    if !request["bodies"].is_object() {
+        request["bodies"] = json!({ "json": "", "text": "" });
+    }
+    if !request["bodies"]["json"].is_string() {
+        request["bodies"]["json"] = Value::String(String::new());
+    }
+    if !request["bodies"]["text"].is_string() {
+        request["bodies"]["text"] = Value::String(String::new());
+    }
+    if body_type == "json" || body_type == "text" {
+        request["bodies"][&body_type] = Value::String(body);
+    }
+
+    let environment_values = request["bodyEnvironmentValues"].clone();
+    let nested = environment_values["json"].is_object() || environment_values["text"].is_object();
+    if !nested {
+        request["bodyEnvironmentValues"] = json!({ "json": {}, "text": {} });
+        if (body_type == "json" || body_type == "text") && environment_values.is_object() {
+            request["bodyEnvironmentValues"][&body_type] = environment_values;
+        }
+    } else {
+        if !request["bodyEnvironmentValues"]["json"].is_object() {
+            request["bodyEnvironmentValues"]["json"] = json!({});
+        }
+        if !request["bodyEnvironmentValues"]["text"].is_object() {
+            request["bodyEnvironmentValues"]["text"] = json!({});
+        }
+    }
 }
 
 fn delete_request(app: &AppHandle, arguments: &Value) -> Result<Value, String> {

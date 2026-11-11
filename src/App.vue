@@ -83,7 +83,8 @@ const makeRequest = (name = "新请求", url = "") => ({
   headers: [pair("Accept", "application/json")],
   bodyType: "none",
   body: "",
-  bodyEnvironmentValues: {},
+  bodies: { json: "", text: "" },
+  bodyEnvironmentValues: { json: {}, text: {} },
   formBody: [pair()],
   formData: [pair()],
   postScript: defaultPostScript,
@@ -527,13 +528,43 @@ function normalizeRequest(request, inheritedPostScript = defaultPostScript) {
   request.headers ||= [pair()];
   request.bodyType ||= "none";
   request.body ||= "";
-  request.bodyEnvironmentValues ||= {};
+  normalizeRequestBodyStorage(request);
   request.formBody ||= [pair()];
   request.formData ||= [pair()];
   request.postScript ??= inheritedPostScript || defaultPostScript;
   request.batchData ??= "";
   request.batchPlaceholderNames ??= [];
   return request;
+}
+
+function rawBodyType(bodyType) {
+  return bodyType === "json" || bodyType === "text" ? bodyType : "";
+}
+
+function normalizeRequestBodyStorage(request) {
+  const currentType = rawBodyType(request.bodyType);
+  const bodies = request.bodies && typeof request.bodies === "object" && !Array.isArray(request.bodies)
+    ? request.bodies
+    : {};
+  bodies.json ??= "";
+  bodies.text ??= "";
+  if (currentType) bodies[currentType] = String(request.body ?? bodies[currentType] ?? "");
+  request.bodies = bodies;
+
+  const source = request.bodyEnvironmentValues;
+  const nested = source && typeof source === "object" && !Array.isArray(source)
+    && (["json", "text"].some((type) => source[type] && typeof source[type] === "object" && !Array.isArray(source[type])));
+  if (nested) {
+    source.json ||= {};
+    source.text ||= {};
+    request.bodyEnvironmentValues = source;
+  } else {
+    request.bodyEnvironmentValues = { json: {}, text: {} };
+    if (currentType && source && typeof source === "object" && !Array.isArray(source)) {
+      request.bodyEnvironmentValues[currentType] = source;
+    }
+  }
+  request.body = currentType ? bodies[currentType] : String(request.body || "");
 }
 
 function cacheRequestDetail(request) {
@@ -697,22 +728,48 @@ function setRequestValue(item, value, environmentId = workspace.activeEnvironmen
 }
 
 function hasBodyEnvironmentValue(request, environmentId = workspace.activeEnvironmentId) {
+  const type = rawBodyType(request.bodyType);
   return !workspace.environments.find((environment) => environment.id === environmentId)?.isDefault
-    && Object.prototype.hasOwnProperty.call(request.bodyEnvironmentValues || {}, environmentId);
+    && Boolean(type)
+    && Object.prototype.hasOwnProperty.call(request.bodyEnvironmentValues?.[type] || {}, environmentId);
 }
 
 function requestBodyValue(request, environmentId = workspace.activeEnvironmentId) {
-  return hasBodyEnvironmentValue(request, environmentId) ? request.bodyEnvironmentValues[environmentId] : request.body;
+  const type = rawBodyType(request.bodyType);
+  if (!type) return request.body || "";
+  return hasBodyEnvironmentValue(request, environmentId)
+    ? request.bodyEnvironmentValues[type][environmentId]
+    : request.bodies?.[type] || "";
 }
 
 function setRequestBodyValue(request, value, environmentId = workspace.activeEnvironmentId) {
-  const environment = workspace.environments.find((candidate) => candidate.id === environmentId);
-  if (!environment || environment.isDefault) {
+  const type = rawBodyType(request.bodyType);
+  if (!type) {
     request.body = value;
     return;
   }
-  request.bodyEnvironmentValues ||= {};
-  request.bodyEnvironmentValues[environmentId] = value;
+  const environment = workspace.environments.find((candidate) => candidate.id === environmentId);
+  if (!environment || environment.isDefault) {
+    request.bodies ||= { json: "", text: "" };
+    request.bodies[type] = value;
+    request.body = value;
+    return;
+  }
+  request.bodyEnvironmentValues ||= { json: {}, text: {} };
+  request.bodyEnvironmentValues[type] ||= {};
+  request.bodyEnvironmentValues[type][environmentId] = value;
+}
+
+function selectBodyType(request, bodyType) {
+  const previousType = rawBodyType(request.bodyType);
+  if (previousType) {
+    request.bodies ||= { json: "", text: "" };
+    request.bodies[previousType] = request.body;
+  }
+  request.bodyType = bodyType;
+  const nextType = rawBodyType(bodyType);
+  request.body = nextType ? request.bodies?.[nextType] || "" : "";
+  bodyFormatError.value = "";
 }
 
 function applyRequestEnvironment(request, environmentId = workspace.activeEnvironmentId) {
@@ -3317,7 +3374,7 @@ onBeforeUnmount(() => {
             <div v-else-if="activeTab === 'body'" class="body-editor">
               <div class="body-toolbar">
                 <div class="segmented">
-                  <button v-for="type in [{id:'none',label:'None'}, {id:'json',label:'JSON'}, {id:'form',label:'x-www-form-urlencoded'}, {id:'formdata',label:'form-data'}, {id:'text',label:'Text'}]" :key="type.id" :class="{ active: selectedRequest.bodyType === type.id }" @click="selectedRequest.bodyType = type.id; bodyFormatError = ''">{{ type.label }}</button>
+                  <button v-for="type in [{id:'none',label:'None'}, {id:'json',label:'JSON'}, {id:'form',label:'x-www-form-urlencoded'}, {id:'formdata',label:'form-data'}, {id:'text',label:'Text'}]" :key="type.id" :class="{ active: selectedRequest.bodyType === type.id }" @click="selectBodyType(selectedRequest, type.id)">{{ type.label }}</button>
                 </div>
                 <div v-if="!activeEnvironmentIsDefault && !['none', 'form', 'formdata'].includes(selectedRequest.bodyType)" class="body-environment-state" :class="{ overridden: hasBodyEnvironmentValue(selectedRequest) }">
                   <span>{{ hasBodyEnvironmentValue(selectedRequest) ? `${activeEnvironment.name} 覆盖` : `继承 Default` }}</span>
