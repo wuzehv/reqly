@@ -83,6 +83,17 @@ const commonRequestHeaders = [
   "X-Signature",
   "X-Timestamp",
 ];
+const commonRequestHeaderValues = {
+  accept: ["application/json", "text/plain", "application/xml", "text/html", "*/*"],
+  "accept-encoding": ["gzip, deflate, br", "gzip, deflate", "identity"],
+  "accept-language": ["zh-CN,zh;q=0.9", "en-US,en;q=0.9", "th-TH,th;q=0.9,en;q=0.8"],
+  authorization: ["Bearer ", "Basic "],
+  "cache-control": ["no-cache", "no-store", "max-age=0", "public, max-age=3600"],
+  "content-type": ["application/json", "application/x-www-form-urlencoded", "multipart/form-data", "text/plain", "application/xml", "application/octet-stream"],
+  "if-match": ["*"],
+  "if-none-match": ["*"],
+  "x-requested-with": ["XMLHttpRequest"],
+};
 const mcpTools = [
   { name: "reqly_list_collections", description: "列出集合、子分组和请求" },
   { name: "reqly_list_environments", description: "列出环境和当前环境" },
@@ -182,6 +193,8 @@ const activePlaceholderVariableMenu = ref("");
 const placeholderVariableMenuPosition = reactive({ top: 0, left: 0, width: 0 });
 const activeHeaderSuggestionRow = ref("");
 const headerSuggestionMenuPosition = reactive({ top: 0, left: 0, width: 0 });
+const activeHeaderValueSuggestionRow = ref("");
+const headerValueSuggestionMenuPosition = reactive({ top: 0, left: 0, width: 0 });
 const scriptLogs = ref([]);
 const consoleOpen = ref(false);
 const consoleUnread = ref(0);
@@ -1208,6 +1221,7 @@ function headerSuggestions(value) {
 }
 
 function openHeaderSuggestions(item, event) {
+  activeHeaderValueSuggestionRow.value = "";
   activeHeaderSuggestionRow.value = item.id;
   const bounds = event.currentTarget.getBoundingClientRect();
   const menuHeight = 196;
@@ -1216,6 +1230,47 @@ function openHeaderSuggestions(item, event) {
     : Math.max(6, bounds.top - menuHeight - 3);
   headerSuggestionMenuPosition.left = bounds.left;
   headerSuggestionMenuPosition.width = bounds.width;
+}
+
+function headerValueSuggestions(item) {
+  const values = commonRequestHeaderValues[String(item.key || "").trim().toLowerCase()] || [];
+  const query = String(requestValue(item) || "").trim();
+  return values.filter((value) => !query || fuzzyVariableMatch(value, query));
+}
+
+function openHeaderValueSuggestions(item, event) {
+  activeHeaderSuggestionRow.value = "";
+  if (!commonRequestHeaderValues[String(item.key || "").trim().toLowerCase()]) {
+    activeHeaderValueSuggestionRow.value = "";
+    return;
+  }
+  activeHeaderValueSuggestionRow.value = item.id;
+  const bounds = event.currentTarget.getBoundingClientRect();
+  const menuHeight = 196;
+  headerValueSuggestionMenuPosition.top = window.innerHeight - bounds.bottom >= menuHeight
+    ? bounds.bottom + 3
+    : Math.max(6, bounds.top - menuHeight - 3);
+  headerValueSuggestionMenuPosition.left = bounds.left;
+  headerValueSuggestionMenuPosition.width = bounds.width;
+}
+
+function selectHeaderValueSuggestion(item, value) {
+  setRequestValue(item, value);
+  activeHeaderValueSuggestionRow.value = "";
+}
+
+function closeHeaderValueSuggestions(item) {
+  window.setTimeout(() => {
+    if (activeHeaderValueSuggestionRow.value === item.id) activeHeaderValueSuggestionRow.value = "";
+  }, 100);
+}
+
+function handleHeaderValueSuggestionEnter(item, event) {
+  if (activeHeaderValueSuggestionRow.value !== item.id) return;
+  const [first] = headerValueSuggestions(item);
+  if (!first) return;
+  event.preventDefault();
+  selectHeaderValueSuggestion(item, first);
 }
 
 function selectHeaderSuggestion(item, value) {
@@ -1229,7 +1284,7 @@ function selectFirstHeaderSuggestion(item) {
 }
 
 function handleHeaderSuggestionEnter(item, event) {
-  if (activeTab.value !== "headers") return;
+  if (activeTab.value !== "headers" || activeHeaderSuggestionRow.value !== item.id) return;
   event.preventDefault();
   selectFirstHeaderSuggestion(item);
 }
@@ -3572,8 +3627,8 @@ onBeforeUnmount(() => {
                   :data-row-key="item.id"
                   autocomplete="off"
                   placeholder="键"
-                  @focus="activeTab === 'headers' && openHeaderSuggestions(item, $event)"
-                  @input="activeTab === 'params' ? syncUrlFromParams(selectedRequest) : activeHeaderSuggestionRow = item.id"
+                  @click="activeTab === 'headers' && openHeaderSuggestions(item, $event)"
+                  @input="activeTab === 'params' ? syncUrlFromParams(selectedRequest) : openHeaderSuggestions(item, $event)"
                   @blur="activeTab === 'headers' && closeHeaderSuggestions(item)"
                   @keydown.enter="handleHeaderSuggestionEnter(item, $event)"
                   @keydown.esc="activeHeaderSuggestionRow = ''"
@@ -3602,7 +3657,27 @@ onBeforeUnmount(() => {
                   <textarea v-else :value="requestValue(item)" rows="1" placeholder="值" @input="setRequestValue(item, $event.currentTarget.value); syncUrlFromParams(selectedRequest)"></textarea>
                 </div>
                 <div v-else class="kv-value-editor simple" :class="{ 'environment-overridden': hasEnvironmentValue(item), 'environment-inherited': !activeEnvironmentIsDefault && !hasEnvironmentValue(item) }">
-                  <textarea :value="requestValue(item)" rows="1" placeholder="值" @input="setRequestValue(item, $event.currentTarget.value)"></textarea>
+                  <textarea
+                    :value="requestValue(item)"
+                    rows="1"
+                    placeholder="值"
+                    @click="openHeaderValueSuggestions(item, $event)"
+                    @input="setRequestValue(item, $event.currentTarget.value); openHeaderValueSuggestions(item, $event)"
+                    @blur="closeHeaderValueSuggestions(item)"
+                    @keydown.enter="handleHeaderValueSuggestionEnter(item, $event)"
+                    @keydown.esc="activeHeaderValueSuggestionRow = ''"
+                  ></textarea>
+                  <Teleport to="body">
+                    <div
+                      v-if="activeHeaderValueSuggestionRow === item.id"
+                      class="placeholder-variable-options"
+                      :class="`theme-${workspace.appearance.mode}`"
+                      :style="{ top: `${headerValueSuggestionMenuPosition.top}px`, left: `${headerValueSuggestionMenuPosition.left}px`, width: `${headerValueSuggestionMenuPosition.width}px` }"
+                    >
+                      <button v-for="value in headerValueSuggestions(item)" :key="value" @mousedown.prevent="selectHeaderValueSuggestion(item, value)">{{ value }}</button>
+                      <span v-if="!headerValueSuggestions(item).length">没有匹配的请求头值</span>
+                    </div>
+                  </Teleport>
                 </div>
                 <button class="row-action" title="删除" @click="removeRow(activeTab === 'params' ? selectedRequest.params : selectedRequest.headers, index); activeTab === 'params' && syncUrlFromParams(selectedRequest)"><X :size="14" /></button>
               </div>
