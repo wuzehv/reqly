@@ -963,26 +963,43 @@ async function createTemporaryRequestFromUrl(url) {
     showNotice(`无法创建接口：${formatError(error)}`);
     return;
   }
-  const request = makeRequest(temporaryRequestName(url), url);
+  const collectionName = "自动生成接口";
+  let collection = workspace.collections.find((item) => item.generatedSource === "response-url" || item.name === collectionName);
+  if (!collection) {
+    collection = {
+      id: uid(),
+      name: collectionName,
+      expanded: true,
+      archiveExpanded: false,
+      generatedSource: "response-url",
+      preScriptProfileId: "",
+      preScriptPlaceholders: [],
+      requests: [],
+      requestCount: 0,
+      requestsLoaded: true,
+      groups: [],
+    };
+    workspace.collections.push(collection);
+  } else if (isTauri() && !collection.requestsLoaded) {
+    await loadGroupRequests(collection);
+  }
+  const baseName = temporaryRequestName(url);
+  const existingNames = new Set(collection.requests.map((request) => request.name));
+  let requestName = baseName;
+  let suffix = 2;
+  while (existingNames.has(requestName)) requestName = `${baseName} ${suffix++}`;
+  const request = makeRequest(requestName, url);
   syncParamsFromUrl(request);
-  const timestamp = new Date().toLocaleTimeString([], { hour12: false });
-  const collection = {
-    id: uid(),
-    name: `临时接口 ${timestamp}`,
-    expanded: true,
-    archiveExpanded: false,
-    temporary: true,
-    preScriptProfileId: "",
-    preScriptPlaceholders: [],
-    requests: [request],
-    requestCount: 1,
-    requestsLoaded: true,
-    groups: [],
-  };
-  workspace.collections.push(collection);
-  cacheRequestDetail(request);
+  if (isTauri()) {
+    cacheRequestDetail(request);
+    collection.requests.push(requestSummary(request));
+  } else {
+    collection.requests.push(request);
+  }
+  collection.requestCount = collection.requests.length;
+  collection.expanded = true;
   await changeSelectedRequest(request.id);
-  showNotice(`已创建临时接口：${request.name}`);
+  showNotice(`已添加到“${collectionName}”：${request.name}`);
 }
 
 async function openResponseUrl(url) {
@@ -3687,7 +3704,7 @@ onBeforeUnmount(() => {
             <div v-else-if="activeTab === 'body'" class="body-editor">
               <div class="body-toolbar">
                 <div class="segmented body-type-segmented">
-                  <button v-for="type in [{id:'none',label:'None'}, {id:'json',label:'JSON'}, {id:'form',label:'x-www-form-urlencoded'}, {id:'formdata',label:'form-data'}, {id:'text',label:'Text'}, {id:'binary',label:'Binary'}]" :key="type.id" :class="{ active: selectedRequest.bodyType === type.id }" @click="selectBodyType(selectedRequest, type.id)">{{ type.label }}</button>
+                  <button v-for="type in [{id:'none',label:'None',title:'No Body'}, {id:'json',label:'JSON',title:'application/json'}, {id:'form',label:'URL Encoded',title:'application/x-www-form-urlencoded'}, {id:'formdata',label:'Form Data',title:'multipart/form-data'}, {id:'text',label:'Text',title:'text/plain'}, {id:'binary',label:'Binary',title:'Binary file'}]" :key="type.id" :class="{ active: selectedRequest.bodyType === type.id }" :title="type.title" @click="selectBodyType(selectedRequest, type.id)">{{ type.label }}</button>
                 </div>
                 <div v-if="!activeEnvironmentIsDefault && !['none', 'form', 'formdata'].includes(selectedRequest.bodyType)" class="body-environment-state" :class="{ overridden: hasBodyEnvironmentValue(selectedRequest) }">
                   <span>{{ hasBodyEnvironmentValue(selectedRequest) ? `${activeEnvironment.name} 覆盖` : `继承 Default` }}</span>
