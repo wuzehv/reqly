@@ -42,6 +42,7 @@ Available tools:
 
 - `reqly_list_collections`: list collections and saved requests
 - `reqly_list_environments`: list environment summaries and the active environment ID
+- `reqly_list_environment_variables`: list public variables from the active environment or an environment ID; private variables are never returned
 - `reqly_switch_environment`: switch the active workspace environment used by subsequent request runs
 - `reqly_create_collection`: create a collection
 - `reqly_create_subgroup`: create a second-level group that inherits its parent collection Pre-request script
@@ -54,7 +55,7 @@ Available tools:
 - `reqly_bind_script_template`: bind or unbind a template on a top-level collection and configure placeholder sources
 - `reqly_run_request`: run a saved request with an optional `environmentId` and per-run variable overrides; without an ID it uses the active environment
 
-For environment-specific runs, MCP clients are instructed to call `reqly_list_environments`, switch once with `reqly_switch_environment`, and then call `reqly_run_request` without `environmentId`. Environment IDs must come from the list result and must not be guessed.
+For environment-specific runs, MCP clients are instructed to call `reqly_list_environments`, switch once with `reqly_switch_environment`, and then call `reqly_run_request` without `environmentId`. Environment IDs must come from the list result and must not be guessed. Environment variables can be marked private in settings; `reqly_list_environment_variables` completely omits private variables, including their names and values.
 
 The MCP server is accessible on the local network and does not currently require authentication. Use a trusted network and restrict access with the system firewall. Browser origins other than localhost are rejected. Saved requests run through Reqly's normal execution pipeline, including environment variables, Pre-request scripts, Post-response scripts, retries, and supported body types.
 

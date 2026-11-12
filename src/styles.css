@@ -590,10 +590,12 @@ input[type="checkbox"] { width: 13px; height: 13px; margin: 0 0 0 5px; accent-co
 .namespace-create-row button { width: 27px; height: 27px; display: grid; place-items: center; border: 0; border-radius: 3px; padding: 0; color: #68747c; background: transparent; cursor: pointer; }
 .namespace-create-row button:hover { color: #29343c; background: var(--panel-soft); }
 .namespace-create-row button:disabled { opacity: .35; cursor: default; }
-.variable-row { grid-template-columns: 28px minmax(90px, .7fr) minmax(130px, 1.3fr) 30px; }
+.variable-row { grid-template-columns: 28px minmax(90px, .7fr) minmax(130px, 1.3fr) 30px 30px; }
 .variable-row.level-1 { width: calc(100% - 22px); margin-left: 22px; }
 .variable-row.level-2 { width: calc(100% - 44px); margin-left: 44px; }
 .variable-row > input:not([type="checkbox"]) { min-width: 0; }
+.variable-row .variable-privacy { opacity: 1; color: #76828a; }
+.variable-row .variable-privacy.private { color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
 .environment-create { margin-bottom: 14px; }
 .environment-manager { display: grid; grid-template-columns: minmax(100px, .8fr) minmax(100px, 1fr) 32px minmax(110px, 1fr) 30px 30px; gap: 6px; margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--line-soft); }
 .environment-manager select, .environment-manager input { min-width: 0; height: 32px; border: 1px solid #bdc6cc; border-radius: 4px; padding: 0 8px; outline: 0; color: #34414a; background: #f3f5f5; font-size: 12px; }
@@ -609,13 +611,15 @@ input[type="checkbox"] { width: 13px; height: 13px; margin: 0 0 0 5px; accent-co
 .environment-manager button:hover:not(:disabled) { border-color: #8d989f; background: #dce2e5; }
 .environment-manager button:disabled { opacity: .4; cursor: default; }
 .environment-create-fields { display: grid; gap: 8px; }
-.direct-variable-fields { grid-template-columns: minmax(0, .85fr) minmax(0, 1.15fr) auto; }
+.direct-variable-fields { grid-template-columns: minmax(0, .85fr) minmax(0, 1.15fr) 68px auto; }
 .environment-create-fields input { min-width: 0; height: 32px; border: 1px solid #bdc6cc; border-radius: 4px; padding: 0 9px; outline: 0; color: #34414a; background: #f3f5f5; font-size: 12px; }
 .environment-create-fields input:focus { border-color: #89959d; }
 .environment-create-fields input.invalid { border-color: var(--red); }
 .environment-create-fields button { height: 32px; display: flex; align-items: center; gap: 5px; border: 1px solid #b8c2c8; border-radius: 4px; padding: 0 9px; color: #4d5962; background: #e8ecee; font-size: 11px; cursor: pointer; }
 .environment-create-fields button:hover { border-color: #8d989f; background: #dce2e5; }
 .environment-create-fields button:disabled { opacity: .45; cursor: default; }
+.environment-create-fields .draft-privacy { justify-content: center; padding: 0 7px; color: #66737b; }
+.environment-create-fields .draft-privacy.private { border-color: color-mix(in srgb, var(--accent) 45%, #b8c2c8); color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, #e8ecee); }
 .settings-panel > footer { height: 64px; display: flex; justify-content: flex-end; align-items: center; padding: 0 22px; border-top: 1px solid var(--line); }
 .primary-button { height: 32px; min-width: 84px; border-radius: 4px; font-size: 13px; }
 

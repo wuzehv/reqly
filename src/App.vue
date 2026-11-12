@@ -26,6 +26,7 @@ import {
   Folder,
   FolderPlus,
   GripVertical,
+  Lock,
   Moon,
   Network,
   Pencil,
@@ -40,6 +41,7 @@ import {
   Sun,
   Terminal,
   Trash2,
+  Unlock,
   X,
 } from "@lucide/vue";
 
@@ -55,6 +57,7 @@ function importedProfileName(name, profiles) {
 }
 const cloneData = (value) => JSON.parse(JSON.stringify(toRaw(value)));
 const pair = (key = "", value = "") => ({ id: uid(), key, value, enabled: true });
+const environmentVariable = (key = "", value = "", isPrivate = true) => ({ ...pair(key, value), isPrivate });
 const formDataPair = (key = "", value = "") => ({ ...pair(key, value), type: "text" });
 const defaultPreScript = "// 发送集合内的请求前运行\n// pm.environment.set(\"token\", \"your-token\");";
 const defaultPreScriptTemplate = "// 使用无引号占位符，分组可将其绑定到环境变量或固定值";
@@ -97,6 +100,7 @@ const commonRequestHeaderValues = {
 const mcpTools = [
   { name: "reqly_list_collections", description: "列出集合、子分组和请求" },
   { name: "reqly_list_environments", description: "列出环境和当前环境" },
+  { name: "reqly_list_environment_variables", description: "列出环境中的公开变量" },
   { name: "reqly_switch_environment", description: "切换工作区当前环境" },
   { name: "reqly_create_collection", description: "创建一级集合" },
   { name: "reqly_create_subgroup", description: "创建二级分组" },
@@ -136,7 +140,7 @@ const defaultWorkspace = () => {
     preScriptProfiles: [],
     selectedRequestId: request.id,
     variables: [],
-    environments: [{ id: environmentId, name: "Default", color: "#ffffff", isDefault: true, variables: [pair("baseUrl", "https://httpbin.org")] }],
+    environments: [{ id: environmentId, name: "Default", color: "#ffffff", isDefault: true, variables: [environmentVariable("baseUrl", "https://httpbin.org", false)] }],
     activeEnvironmentId: environmentId,
     proxy: { enabled: false, url: "http://127.0.0.1:7890", username: "", password: "" },
     mcp: { enabled: true, port: 3765 },
@@ -200,6 +204,8 @@ const consoleOpen = ref(false);
 const consoleUnread = ref(0);
 const variableDraftKey = ref("");
 const variableDraftValue = ref("");
+const variableDraftIsPrivate = ref(true);
+const pendingInitialVariableTargets = new Map();
 const environmentDraftName = ref("");
 const subNamespaceParent = ref("");
 const subNamespaceDraft = ref("");
@@ -1768,11 +1774,15 @@ function normalizeWorkspace(saved) {
       name: environment.name?.trim() || `环境 ${index + 1}`,
       color: environment.color || "#ffffff",
       isDefault: Boolean(environment.isDefault),
-      variables: Array.isArray(environment.variables) ? environment.variables : [],
+      variables: Array.isArray(environment.variables)
+        ? environment.variables
+          .filter((variable) => variable && typeof variable === "object")
+          .map((variable) => ({ ...variable, isPrivate: Boolean(variable.isPrivate) }))
+        : [],
     }));
   if (!saved.environments.length) {
     const environmentId = uid();
-    saved.environments.push({ id: environmentId, name: "Default", color: "#ffffff", isDefault: true, variables: [pair()] });
+    saved.environments.push({ id: environmentId, name: "Default", color: "#ffffff", isDefault: true, variables: [environmentVariable()] });
   }
   const defaultEnvironment = saved.environments.find((environment) => environment.isDefault) || saved.environments[0];
   saved.environments.forEach((environment) => (environment.isDefault = environment.id === defaultEnvironment.id));
@@ -2409,30 +2419,84 @@ function variableLeafName(variable) {
   return variable.key.split(".").at(-1);
 }
 
+function variableFrom(variable, value = "") {
+  const created = environmentVariable(variable.key, value, Boolean(variable.isPrivate));
+  created.enabled = variable.enabled !== false;
+  return created;
+}
+
+function emptyVariableFrom(variable) {
+  return variableFrom(variable);
+}
+
+function propagateVariableName(variable, sourceEnvironmentId = settingsEnvironment.value?.id) {
+  const key = variable.key?.trim();
+  if (!key || !validVariableKey(key)) return [];
+  const createdTargets = [];
+  for (const environment of workspace.environments) {
+    if (environment.id === sourceEnvironmentId || environment.variables.some((item) => item.key === key)) continue;
+    const placeholder = environment.variables.find((item) => !item.key?.trim());
+    if (placeholder) {
+      const created = variableFrom({ ...variable, key }, variable.value ?? "");
+      created.id = placeholder.id;
+      Object.assign(placeholder, created);
+      delete placeholder.namespace;
+      createdTargets.push({ environmentId: environment.id, variableId: placeholder.id });
+    } else {
+      const created = variableFrom({ ...variable, key }, variable.value ?? "");
+      environment.variables.push(created);
+      createdTargets.push({ environmentId: environment.id, variableId: created.id });
+    }
+  }
+  return createdTargets;
+}
+
+function trackInitialVariableTargets(variable, targets) {
+  if (targets.length && !variable.value) pendingInitialVariableTargets.set(variable.id, targets);
+}
+
+function syncInitialVariableValue(variable) {
+  const targets = pendingInitialVariableTargets.get(variable.id);
+  if (!targets || !variable.value) return;
+  for (const target of targets) {
+    const environment = workspace.environments.find((item) => item.id === target.environmentId);
+    const targetVariable = environment?.variables.find((item) => item.id === target.variableId);
+    if (targetVariable) targetVariable.value = variable.value;
+  }
+  pendingInitialVariableTargets.delete(variable.id);
+}
+
 function renameVariableLeaf(variable, namespace, value) {
   const leaf = value.trim();
   if (!leaf || leaf.includes(".")) return;
+  const isNew = !variable.key?.trim();
   variable.key = namespace ? `${namespace}.${leaf}` : leaf;
   delete variable.namespace;
+  if (isNew) trackInitialVariableTargets(variable, propagateVariableName(variable));
 }
 
 function renameVariableKey(variable, value) {
   const key = value.trim();
   if (key && validVariableKey(key)) {
+    const isNew = !variable.key?.trim();
     variable.key = key;
     delete variable.namespace;
+    if (isNew) trackInitialVariableTargets(variable, propagateVariableName(variable));
   }
 }
 
 function removeVariable(variable) {
-  const variables = settingsEnvironmentVariables.value;
-  const index = variables.findIndex((item) => item.id === variable.id);
-  if (index >= 0) variables.splice(index, 1);
-  if (!variables.length) variables.push(pair());
+  const key = variable.key?.trim();
+  const targetEnvironments = key ? workspace.environments : [settingsEnvironment.value].filter(Boolean);
+  for (const environment of targetEnvironments) {
+    environment.variables = environment.variables.filter((item) => key ? item.key !== key : item.id !== variable.id);
+    if (!environment.variables.length) environment.variables.push(environmentVariable());
+  }
+  pendingInitialVariableTargets.delete(variable.id);
 }
 
 function addVariableAt(namespace = "") {
-  const variable = pair();
+  const variable = environmentVariable();
   if (namespace) variable.namespace = namespace;
   settingsEnvironmentVariables.value.push(variable);
   collapsedNamespaces[namespace] = false;
@@ -2445,23 +2509,30 @@ function addDirectVariable() {
   if (existing) {
     existing.value = variableDraftValue.value;
     existing.enabled = true;
+    existing.isPrivate = variableDraftIsPrivate.value;
     delete existing.namespace;
   } else {
-    settingsEnvironmentVariables.value.push(pair(key, variableDraftValue.value));
+    const variable = environmentVariable(key, variableDraftValue.value, variableDraftIsPrivate.value);
+    settingsEnvironmentVariables.value.push(variable);
+    propagateVariableName(variable);
   }
   variableDraftKey.value = "";
   variableDraftValue.value = "";
+  variableDraftIsPrivate.value = true;
 }
 
 function addEnvironment() {
   const name = environmentDraftName.value.trim();
   if (!name) return;
+  const inheritedVariables = settingsEnvironmentVariables.value
+    .filter((variable) => variable.key?.trim() && validVariableKey(variable.key))
+    .map(emptyVariableFrom);
   const environment = {
     id: uid(),
     name,
     color: "#ffffff",
     isDefault: false,
-    variables: [pair()],
+    variables: inheritedVariables.length ? inheritedVariables : [environmentVariable()],
   };
   workspace.environments.push(environment);
   settingsEnvironmentId.value = environment.id;
@@ -2694,10 +2765,21 @@ async function sendSandboxRequest(nestedRequest, variables = activeEnvironmentVa
 
 function applyScriptVariables(variables, environmentId) {
   const targetVariables = environmentVariables(environmentId);
+  const existingKeys = new Set(targetVariables.map((variable) => variable.key));
+  const privacyByKey = new Map(targetVariables.map((variable) => [variable.key, Boolean(variable.isPrivate)]));
   const outputKeys = new Set(variables.map((variable) => variable.key));
   const disabledVariables = targetVariables.filter((item) => !item.enabled);
   const environment = workspace.environments.find((item) => item.id === environmentId);
-  environment.variables = [...disabledVariables.filter((variable) => !outputKeys.has(variable.key)), ...variables];
+  environment.variables = [
+    ...disabledVariables.filter((variable) => !outputKeys.has(variable.key)),
+    ...variables.map((variable) => ({
+      ...variable,
+      isPrivate: privacyByKey.has(variable.key) ? privacyByKey.get(variable.key) : true,
+    })),
+  ];
+  environment.variables
+    .filter((variable) => !existingKeys.has(variable.key))
+    .forEach((variable) => propagateVariableName(variable, environmentId));
 }
 
 async function buildInput(source, variables, persistVariables = true, group = selectedRequestGroup.value, environmentId = workspace.activeEnvironmentId) {
@@ -3932,7 +4014,7 @@ onBeforeUnmount(() => {
             </template>
           </div>
           <div class="setting-section variables-section" :class="{ collapsed: collapsedSettings.variables }">
-            <div class="setting-title"><button class="setting-title-toggle" @click="collapsedSettings.variables = !collapsedSettings.variables"><ChevronRight v-if="collapsedSettings.variables" :size="16" /><ChevronDown v-else :size="16" /><div><h3>环境变量</h3><p>在此查看和编辑变量，运行环境仅由顶部入口切换</p></div></button></div>
+            <div class="setting-title"><button class="setting-title-toggle" @click="collapsedSettings.variables = !collapsedSettings.variables"><ChevronRight v-if="collapsedSettings.variables" :size="16" /><ChevronDown v-else :size="16" /><div><h3>环境变量</h3><p>公开变量可由 MCP 读取，隐私变量仅在 Reqly 内使用</p></div></button></div>
             <div v-if="!collapsedSettings.variables" class="variable-tree">
               <div class="environment-manager">
                 <select v-model="settingsEnvironmentId" title="查看环境变量">
@@ -3949,7 +4031,8 @@ onBeforeUnmount(() => {
               <div class="environment-create">
                 <div class="environment-create-fields direct-variable-fields">
                   <input v-model="variableDraftKey" :class="{ invalid: variableDraftKey.trim() && !validVariableKey(variableDraftKey.trim()) }" placeholder="变量名" @keydown.enter="addDirectVariable" />
-                  <input v-model="variableDraftValue" placeholder="值" @keydown.enter="addDirectVariable" />
+                  <input v-model="variableDraftValue" :type="variableDraftIsPrivate ? 'password' : 'text'" placeholder="值" autocomplete="off" @keydown.enter="addDirectVariable" />
+                  <button type="button" class="draft-privacy" :class="{ private: variableDraftIsPrivate }" :title="variableDraftIsPrivate ? '隐私变量不会通过 MCP 返回' : '公开变量可通过 MCP 读取'" @click="variableDraftIsPrivate = !variableDraftIsPrivate"><Lock v-if="variableDraftIsPrivate" :size="13" /><Unlock v-else :size="13" />{{ variableDraftIsPrivate ? '隐私' : '公开' }}</button>
                   <button :disabled="!variableDraftKey.trim() || !validVariableKey(variableDraftKey.trim())" @click="addDirectVariable"><Plus :size="14" />添加变量</button>
                 </div>
               </div>
@@ -3957,7 +4040,8 @@ onBeforeUnmount(() => {
               <div v-for="item in variableHierarchy.roots" :key="item.id" class="kv-row variable-row level-0">
                 <input v-model="item.enabled" type="checkbox" aria-label="启用" />
                 <input :value="item.key" :class="{ invalid: !validVariableKey(item.key) }" placeholder="变量名" @change="renameVariableKey(item, $event.target.value)" />
-                <input v-model="item.value" placeholder="值" />
+                <input v-model="item.value" :type="item.isPrivate ? 'password' : 'text'" placeholder="值" autocomplete="off" @change="syncInitialVariableValue(item)" />
+                <button class="row-action variable-privacy" :class="{ private: item.isPrivate }" :title="item.isPrivate ? '隐私变量：MCP 无法读取，点击设为公开' : '公开变量：MCP 可读取，点击设为隐私'" @click="item.isPrivate = !item.isPrivate"><Lock v-if="item.isPrivate" :size="13" /><Unlock v-else :size="13" /></button>
                 <button class="row-action" title="删除" @click="removeVariable(item)"><X :size="14" /></button>
               </div>
 
@@ -3978,7 +4062,8 @@ onBeforeUnmount(() => {
                   <div v-for="item in group.variables" :key="item.id" class="kv-row variable-row level-1">
                     <input v-model="item.enabled" type="checkbox" aria-label="启用" />
                     <input :value="variableLeafName(item)" placeholder="变量名" @change="renameVariableLeaf(item, group.path, $event.target.value)" />
-                    <input v-model="item.value" placeholder="值" />
+                    <input v-model="item.value" :type="item.isPrivate ? 'password' : 'text'" placeholder="值" autocomplete="off" @change="syncInitialVariableValue(item)" />
+                    <button class="row-action variable-privacy" :class="{ private: item.isPrivate }" :title="item.isPrivate ? '隐私变量：MCP 无法读取，点击设为公开' : '公开变量：MCP 可读取，点击设为隐私'" @click="item.isPrivate = !item.isPrivate"><Lock v-if="item.isPrivate" :size="13" /><Unlock v-else :size="13" /></button>
                     <button class="row-action" title="删除" @click="removeVariable(item)"><X :size="14" /></button>
                   </div>
                   <section v-for="subgroup in group.groups" :key="subgroup.path" class="namespace-group nested">
@@ -3991,7 +4076,8 @@ onBeforeUnmount(() => {
                       <div v-for="item in subgroup.variables" :key="item.id" class="kv-row variable-row level-2">
                         <input v-model="item.enabled" type="checkbox" aria-label="启用" />
                         <input :value="variableLeafName(item)" placeholder="变量名" @change="renameVariableLeaf(item, subgroup.path, $event.target.value)" />
-                        <input v-model="item.value" placeholder="值" />
+                        <input v-model="item.value" :type="item.isPrivate ? 'password' : 'text'" placeholder="值" autocomplete="off" @change="syncInitialVariableValue(item)" />
+                        <button class="row-action variable-privacy" :class="{ private: item.isPrivate }" :title="item.isPrivate ? '隐私变量：MCP 无法读取，点击设为公开' : '公开变量：MCP 可读取，点击设为隐私'" @click="item.isPrivate = !item.isPrivate"><Lock v-if="item.isPrivate" :size="13" /><Unlock v-else :size="13" /></button>
                         <button class="row-action" title="删除" @click="removeVariable(item)"><X :size="14" /></button>
                       </div>
                     </div>

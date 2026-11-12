@@ -189,7 +189,7 @@ async fn handle_post(
             "protocolVersion": negotiated_protocol_version(&message),
             "capabilities": { "tools": { "listChanged": false } },
             "serverInfo": { "name": "reqly", "version": env!("CARGO_PKG_VERSION") },
-            "instructions": "Environment workflow: before running requests in a named environment, call reqly_list_environments, select the exact returned environment ID without guessing, call reqly_switch_environment once, then call reqly_run_request without environmentId. The active environment persists for subsequent runs until explicitly switched again. If the requested environment name is missing or ambiguous, ask the user instead of choosing an ID."
+            "instructions": "Environment workflow: before running requests in a named environment, call reqly_list_environments, select the exact returned environment ID without guessing, call reqly_switch_environment once, then call reqly_run_request without environmentId. The active environment persists for subsequent runs until explicitly switched again. Use reqly_list_environment_variables to read public variables; private variables are never exposed through MCP. If the requested environment name is missing or ambiguous, ask the user instead of choosing an ID."
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tool_definitions() })),
@@ -242,6 +242,15 @@ fn tool_definitions() -> Vec<Value> {
             "name": "reqly_list_environments",
             "description": "List Reqly workspace environments and the active environment ID. Call this before switching environments; environment IDs must come from this result and must never be guessed.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        }),
+        json!({
+            "name": "reqly_list_environment_variables",
+            "description": "Get public variables from a Reqly environment. Private variables are completely omitted. Omit environmentId to use the active environment, or use an exact ID returned by reqly_list_environments.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "environmentId": { "type": "string", "minLength": 1 } },
+                "additionalProperties": false
+            }
         }),
         json!({
             "name": "reqly_switch_environment",
@@ -412,6 +421,7 @@ async fn call_tool(state: &McpState, params: Value) -> Result<Value, (i64, Strin
     let _mutation_guard = match name {
         "reqly_list_collections"
         | "reqly_list_environments"
+        | "reqly_list_environment_variables"
         | "reqly_list_script_templates"
         | "reqly_run_request" => None,
         _ => Some(state.manager.workspace_mutations.lock().await),
@@ -419,6 +429,9 @@ async fn call_tool(state: &McpState, params: Value) -> Result<Value, (i64, Strin
     let result = match name {
         "reqly_list_collections" => list_collections(&state.app),
         "reqly_list_environments" => list_environments(&state.app),
+        "reqly_list_environment_variables" => {
+            list_environment_variables(&state.app, &arguments)
+        }
         "reqly_switch_environment" => switch_environment(&state.app, &arguments),
         "reqly_create_collection" => create_collection(&state.app, &arguments),
         "reqly_create_subgroup" => create_subgroup(&state.app, &arguments),
@@ -524,6 +537,55 @@ fn list_environments(app: &AppHandle) -> Result<Value, String> {
     Ok(
         json!({ "environments": environments, "activeEnvironmentId": workspace["activeEnvironmentId"] }),
     )
+}
+
+fn list_environment_variables(app: &AppHandle, arguments: &Value) -> Result<Value, String> {
+    let workspace = load_workspace(app)?;
+    public_environment_variables(&workspace, arguments.get("environmentId"))
+}
+
+fn public_environment_variables(
+    workspace: &Value,
+    requested_environment_id: Option<&Value>,
+) -> Result<Value, String> {
+    let environment_id = match requested_environment_id {
+        Some(Value::String(value)) if !value.trim().is_empty() => value.trim(),
+        Some(_) => return Err("environmentId must be a non-empty string".into()),
+        None => workspace["activeEnvironmentId"]
+            .as_str()
+            .ok_or("Reqly workspace does not have an active environment")?,
+    };
+    let environment = workspace["environments"]
+        .as_array()
+        .and_then(|environments| {
+            environments
+                .iter()
+                .find(|environment| environment["id"].as_str() == Some(environment_id))
+        })
+        .ok_or_else(|| format!("Environment not found: {environment_id}"))?;
+    let variables = environment["variables"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|variable| variable["isPrivate"].as_bool() != Some(true))
+        .filter_map(|variable| {
+            let key = variable["key"].as_str()?.trim();
+            if key.is_empty() {
+                return None;
+            }
+            Some(json!({
+                "key": key,
+                "value": variable["value"],
+                "enabled": variable["enabled"].as_bool().unwrap_or(true)
+            }))
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "environment": {
+            "id": environment["id"], "name": environment["name"], "color": environment["color"]
+        },
+        "variables": variables
+    }))
 }
 
 fn switch_environment(app: &AppHandle, arguments: &Value) -> Result<Value, String> {
@@ -1056,5 +1118,59 @@ fn value_as_body(value: Option<&Value>) -> String {
         None | Some(Value::Null) => String::new(),
         Some(Value::String(value)) => value.clone(),
         Some(value) => serde_json::to_string_pretty(value).unwrap_or_default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn environment_variables_exclude_private_and_empty_entries() {
+        let workspace = json!({
+            "activeEnvironmentId": "environment-1",
+            "environments": [{
+                "id": "environment-1",
+                "name": "Development",
+                "color": "#ffffff",
+                "variables": [
+                    { "key": "baseUrl", "value": "https://example.com", "enabled": true },
+                    { "key": "disabledPublic", "value": "visible", "enabled": false, "isPrivate": false },
+                    { "key": "token", "value": "secret", "enabled": true, "isPrivate": true },
+                    { "key": "", "value": "placeholder", "enabled": true }
+                ]
+            }]
+        });
+
+        let result = public_environment_variables(&workspace, None).unwrap();
+
+        assert_eq!(result["environment"]["id"], "environment-1");
+        assert_eq!(result["variables"].as_array().unwrap().len(), 2);
+        assert_eq!(result["variables"][0]["key"], "baseUrl");
+        assert_eq!(result["variables"][1]["enabled"], false);
+        assert!(!result.to_string().contains("token"));
+        assert!(!result.to_string().contains("secret"));
+    }
+
+    #[test]
+    fn environment_variables_support_an_explicit_environment() {
+        let workspace = json!({
+            "activeEnvironmentId": "default",
+            "environments": [
+                { "id": "default", "name": "Default", "variables": [] },
+                { "id": "staging", "name": "Staging", "variables": [
+                    { "key": "baseUrl", "value": "https://staging.example.com", "enabled": true }
+                ] }
+            ]
+        });
+
+        let requested = Value::String("staging".into());
+        let result = public_environment_variables(&workspace, Some(&requested)).unwrap();
+
+        assert_eq!(result["environment"]["id"], "staging");
+        assert_eq!(
+            result["variables"][0]["value"],
+            "https://staging.example.com"
+        );
     }
 }
