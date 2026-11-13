@@ -1,15 +1,14 @@
-use reqwest::{
-    Method, Proxy,
-    header::HeaderMap,
-    multipart::{Form, Part},
-};
+use curl::easy::{Easy, Form, InfoType, List, SslOpt};
+use http::{HeaderName, HeaderValue, Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::BTreeSet, error::Error, fs, net::IpAddr, path::Path, time::Instant};
+use std::{collections::BTreeSet, fs, net::IpAddr, path::Path, time::Duration};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 mod mcp;
 mod storage;
+
+const RAW_REQUEST_CAPTURE_LIMIT: usize = 1024 * 1024;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -54,23 +53,73 @@ pub(crate) struct MultipartField {
 pub(crate) struct ResponseOutput {
     status: u16,
     status_text: String,
+    status_line: String,
+    raw_request: String,
     duration_ms: u128,
     size: usize,
     headers: Vec<(String, String)>,
     body: String,
+    timings: ResponseTimings,
+    connection: ConnectionInfo,
 }
 
-fn request_error(error: reqwest::Error) -> String {
-    let mut messages = vec![error.to_string()];
-    let mut source = error.source();
-    while let Some(cause) = source {
-        let message = cause.to_string();
-        if !messages.contains(&message) {
-            messages.push(message);
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ResponseTimings {
+    dns_ms: f64,
+    tcp_ms: f64,
+    ssl_ms: Option<f64>,
+    request_ms: f64,
+    waiting_ms: f64,
+    download_ms: f64,
+    total_ms: f64,
+    redirect_ms: f64,
+    redirect_count: u32,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ConnectionInfo {
+    effective_url: String,
+    remote_address: Option<String>,
+    local_address: Option<String>,
+}
+
+fn duration_ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
+}
+
+fn elapsed_between(later: Duration, earlier: Duration) -> f64 {
+    duration_ms(later.saturating_sub(earlier))
+}
+
+fn request_error(error: curl::Error) -> String {
+    format!("请求失败：{error}")
+}
+
+fn format_endpoint(address: Option<&str>, port: u16) -> Option<String> {
+    address.map(|address| {
+        if port == 0 {
+            address.to_string()
+        } else if address.contains(':') {
+            format!("[{address}]:{port}")
+        } else {
+            format!("{address}:{port}")
         }
-        source = cause.source();
+    })
+}
+
+fn append_capped(target: &mut Vec<u8>, data: &[u8], truncated: &mut bool) {
+    let remaining = RAW_REQUEST_CAPTURE_LIMIT.saturating_sub(target.len());
+    if remaining == 0 {
+        *truncated = true;
+        return;
     }
-    format!("请求失败：{}", messages.join("；"))
+    let length = remaining.min(data.len());
+    target.extend_from_slice(&data[..length]);
+    if length < data.len() {
+        *truncated = true;
+    }
 }
 
 #[tauri::command]
@@ -192,7 +241,20 @@ async fn import_artifact(
 }
 
 pub(crate) async fn execute_request(input: RequestInput) -> Result<ResponseOutput, String> {
-    let mut client = reqwest::Client::builder();
+    tauri::async_runtime::spawn_blocking(move || execute_request_blocking(input))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn execute_request_blocking(input: RequestInput) -> Result<ResponseOutput, String> {
+    let method = Method::from_bytes(input.method.as_bytes()).map_err(|error| error.to_string())?;
+    let mut easy = Easy::new();
+    easy.url(input.url.trim()).map_err(request_error)?;
+    easy.follow_location(true).map_err(request_error)?;
+    easy.max_redirections(10).map_err(request_error)?;
+    easy.accept_encoding("").map_err(request_error)?;
+    easy.verbose(true).map_err(request_error)?;
+
     if input.proxy.enabled {
         if input.proxy.url.trim().is_empty() {
             return Err("代理已启用，但代理地址为空".into());
@@ -203,89 +265,221 @@ pub(crate) async fn execute_request(input: RequestInput) -> Result<ResponseOutpu
         } else {
             format!("http://{configured_url}")
         };
-        let mut proxy = Proxy::all(&proxy_url)
+        easy.proxy(&proxy_url)
             .map_err(|error| format!("代理地址无效（{proxy_url}）：{error}"))?;
+        let mut ssl_options = SslOpt::new();
+        ssl_options.revoke_best_effort(true);
+        easy.ssl_options(&ssl_options).map_err(request_error)?;
+        easy.proxy_ssl_options(&ssl_options)
+            .map_err(request_error)?;
         if !input.proxy.username.is_empty() {
-            proxy = proxy.basic_auth(&input.proxy.username, &input.proxy.password);
+            easy.proxy_username(&input.proxy.username)
+                .map_err(request_error)?;
+            easy.proxy_password(&input.proxy.password)
+                .map_err(request_error)?;
         }
-        client = client.proxy(proxy);
     }
 
-    let client = client.build().map_err(|error| error.to_string())?;
-    let method = Method::from_bytes(input.method.as_bytes()).map_err(|error| error.to_string())?;
-    let mut headers = HeaderMap::new();
+    let mut header_list = List::new();
     for item in input
         .headers
-        .into_iter()
+        .iter()
         .filter(|item| item.enabled && !item.key.trim().is_empty())
     {
-        let name = reqwest::header::HeaderName::from_bytes(item.key.trim().as_bytes())
+        let name = HeaderName::from_bytes(item.key.trim().as_bytes())
             .map_err(|error| format!("请求头 {} 无效: {error}", item.key))?;
-        let value = reqwest::header::HeaderValue::from_str(&item.value)
+        let value = HeaderValue::from_str(&item.value)
             .map_err(|error| format!("请求头 {} 的值无效: {error}", item.key))?;
-        headers.append(name, value);
+        let value = value
+            .to_str()
+            .map_err(|error| format!("请求头 {} 的值无效: {error}", item.key))?;
+        header_list
+            .append(&format!("{name}: {value}"))
+            .map_err(request_error)?;
     }
+    easy.http_headers(header_list).map_err(request_error)?;
 
-    if !input.multipart.is_empty() {
-        headers.remove(reqwest::header::CONTENT_TYPE);
-    }
-    let mut request = client.request(method, input.url.trim()).headers(headers);
+    let body_bytes = if let Some(path) = input
+        .body_file_path
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+    {
+        Some(fs::read(path).map_err(|error| format!("读取文件失败（{path}）：{error}"))?)
+    } else if !input.body.is_empty() {
+        Some(input.body.into_bytes())
+    } else {
+        None
+    };
+    let mut multipart_form = None;
     if !input.multipart.is_empty() {
         let mut form = Form::new();
-        for field in input.multipart {
+        for field in &input.multipart {
+            let mut part = form.part(&field.name);
+            let mime = (field.kind == "file")
+                .then(|| mime_guess::from_path(field.value.trim()).first_or_octet_stream());
             if field.kind == "file" {
                 let path = field.value.trim();
                 if path.is_empty() {
                     return Err(format!("文件字段 {} 未选择文件", field.name));
                 }
-                let bytes =
-                    fs::read(path).map_err(|error| format!("读取文件失败（{path}）：{error}"))?;
                 let file_name = Path::new(path)
                     .file_name()
                     .and_then(|name| name.to_str())
-                    .unwrap_or("file")
-                    .to_string();
-                let mime = mime_guess::from_path(path).first_or_octet_stream();
-                let part = Part::bytes(bytes)
-                    .file_name(file_name)
-                    .mime_str(mime.as_ref())
-                    .map_err(|error| format!("文件 MIME 类型无效（{path}）：{error}"))?;
-                form = form.part(field.name, part);
+                    .unwrap_or("file");
+                part.file(path)
+                    .filename(file_name)
+                    .content_type(mime.as_ref().expect("file MIME is initialized").as_ref());
             } else {
-                form = form.text(field.name, field.value);
+                part.contents(field.value.as_bytes());
             }
+            part.add()
+                .map_err(|error| format!("构建表单字段 {} 失败：{error}", field.name))?;
         }
-        request = request.multipart(form);
-    } else if let Some(path) = input.body_file_path.filter(|path| !path.trim().is_empty()) {
-        let bytes = fs::read(&path).map_err(|error| format!("读取文件失败（{path}）：{error}"))?;
-        request = request.body(bytes);
-    } else if !input.body.is_empty() {
-        request = request.body(input.body);
+        multipart_form = Some(form);
+    }
+    let has_multipart = multipart_form.is_some();
+    let has_body = body_bytes.is_some();
+    if let Some(form) = multipart_form {
+        easy.httppost(form).map_err(request_error)?;
+    } else if let Some(body) = body_bytes.as_deref() {
+        easy.post_fields_copy(body).map_err(request_error)?;
+    }
+    if method == Method::GET && !has_multipart && !has_body {
+        easy.get(true).map_err(request_error)?;
+    } else if method == Method::HEAD && !has_multipart && !has_body {
+        easy.nobody(true).map_err(request_error)?;
+    } else if method == Method::POST {
+        if !has_multipart && !has_body {
+            easy.post(true).map_err(request_error)?;
+        }
+    } else {
+        easy.custom_request(method.as_str())
+            .map_err(request_error)?;
     }
 
-    let started = Instant::now();
-    let response = request.send().await.map_err(request_error)?;
-    let status = response.status();
-    let response_headers = response
-        .headers()
-        .iter()
-        .map(|(name, value)| {
-            (
-                name.to_string(),
-                value.to_str().unwrap_or("<binary>").to_string(),
-            )
-        })
-        .collect();
-    let bytes = response.bytes().await.map_err(request_error)?;
-    let size = bytes.len();
+    let mut response_body = Vec::new();
+    let mut response_headers = Vec::new();
+    let mut status_text = String::new();
+    let mut status_line = String::new();
+    let mut raw_request = Vec::new();
+    let mut raw_request_truncated = false;
+    {
+        let mut transfer = easy.transfer();
+        transfer
+            .debug_function(|kind, data| match kind {
+                InfoType::HeaderOut | InfoType::DataOut => {
+                    append_capped(&mut raw_request, data, &mut raw_request_truncated);
+                }
+                _ => {}
+            })
+            .map_err(request_error)?;
+        transfer
+            .write_function(|data| {
+                response_body.extend_from_slice(data);
+                Ok(data.len())
+            })
+            .map_err(request_error)?;
+        transfer
+            .header_function(|line| {
+                if line.starts_with(b"HTTP/") {
+                    response_headers.clear();
+                    status_line = String::from_utf8_lossy(line).trim().to_string();
+                    status_text = status_line
+                        .trim()
+                        .splitn(3, ' ')
+                        .nth(2)
+                        .unwrap_or("")
+                        .to_string();
+                } else if let Some(colon) = line.iter().position(|byte| *byte == b':') {
+                    let name = String::from_utf8_lossy(&line[..colon]).trim().to_string();
+                    let value = String::from_utf8_lossy(&line[colon + 1..])
+                        .trim()
+                        .to_string();
+                    response_headers.push((name, value));
+                }
+                true
+            })
+            .map_err(request_error)?;
+        transfer.perform().map_err(request_error)?;
+    }
+
+    let namelookup = easy.namelookup_time().map_err(request_error)?;
+    let connect = easy.connect_time().map_err(request_error)?;
+    let appconnect = easy.appconnect_time().map_err(request_error)?;
+    let pretransfer = easy.pretransfer_time().map_err(request_error)?;
+    let starttransfer = easy.starttransfer_time().map_err(request_error)?;
+    let total = easy.total_time().map_err(request_error)?;
+    let redirect_count = easy.redirect_count().map_err(request_error)?;
+    let redirect_time = easy.redirect_time().map_err(request_error)?;
+    let secure = input
+        .url
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("https://");
+    let connection_ready = if secure && !appconnect.is_zero() {
+        appconnect
+    } else {
+        connect
+    };
+    let remote_address = format_endpoint(
+        easy.primary_ip().map_err(request_error)?,
+        easy.primary_port().map_err(request_error)?,
+    );
+    let local_address = format_endpoint(
+        easy.local_ip().map_err(request_error)?,
+        easy.local_port().map_err(request_error)?,
+    );
+    let effective_url = easy
+        .effective_url()
+        .map_err(request_error)?
+        .unwrap_or(input.url.trim())
+        .to_string();
+    let status = easy.response_code().map_err(request_error)?;
+    if status_text.is_empty() {
+        status_text = u16::try_from(status)
+            .ok()
+            .and_then(|status| StatusCode::from_u16(status).ok())
+            .and_then(|status| status.canonical_reason())
+            .unwrap_or("")
+            .to_string();
+    }
+    if status_line.is_empty() {
+        status_line = format!("HTTP {status} {status_text}")
+            .trim_end()
+            .to_string();
+    }
+    let total_ms = duration_ms(total);
+    let size = response_body.len();
+    let mut raw_request = String::from_utf8_lossy(&raw_request).into_owned();
+    if raw_request_truncated {
+        raw_request.push_str("\r\n[请求报文已在 1 MiB 处截断]");
+    }
 
     Ok(ResponseOutput {
-        status: status.as_u16(),
-        status_text: status.canonical_reason().unwrap_or("").to_string(),
-        duration_ms: started.elapsed().as_millis(),
+        status: u16::try_from(status).unwrap_or(u16::MAX),
+        status_text,
+        status_line,
+        raw_request,
+        duration_ms: total_ms.round() as u128,
         size,
         headers: response_headers,
-        body: String::from_utf8_lossy(&bytes).into_owned(),
+        body: String::from_utf8_lossy(&response_body).into_owned(),
+        timings: ResponseTimings {
+            dns_ms: duration_ms(namelookup),
+            tcp_ms: elapsed_between(connect, namelookup),
+            ssl_ms: secure.then(|| elapsed_between(appconnect, connect)),
+            request_ms: elapsed_between(pretransfer, connection_ready),
+            waiting_ms: elapsed_between(starttransfer, pretransfer),
+            download_ms: elapsed_between(total, starttransfer),
+            total_ms,
+            redirect_ms: duration_ms(redirect_time),
+            redirect_count,
+        },
+        connection: ConnectionInfo {
+            effective_url,
+            remote_address,
+            local_address,
+        },
     })
 }
 

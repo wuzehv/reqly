@@ -38,6 +38,7 @@ import {
   Send,
   Server,
   Settings2,
+  Sparkles,
   Sun,
   Terminal,
   Trash2,
@@ -159,6 +160,7 @@ const sending = computed(() => sendingRequestIds.has(workspace.selectedRequestId
 const saveState = ref("saved");
 const settingsOpen = ref(false);
 const environmentMenuOpen = ref(false);
+const batchEnvironmentMenuOpen = ref(false);
 const settingsEnvironmentId = ref(workspace.activeEnvironmentId);
 const mcpRuntime = reactive({ running: false, port: null, applying: false, error: "" });
 const mcpAddresses = ref([]);
@@ -185,6 +187,7 @@ const selectedBatchResultId = ref("");
 const batchResponseTab = ref("body");
 const batchResponseFullscreen = ref(false);
 const batchProgress = reactive({ current: 0, total: 0 });
+const batchDialogSize = reactive({ width: 0, height: 0 });
 const editingCollectionId = ref("");
 const draggedRequest = ref(null);
 const requestDropTarget = reactive({ id: "", position: "" });
@@ -939,6 +942,7 @@ const variableHierarchy = computed(() => {
 const methodClass = (method) => `method-${method.toLowerCase()}`;
 const sidebarNameParts = (value) => String(value || "").split(/([A-Z][A-Z0-9_-]*[A-Z0-9])/g).filter(Boolean);
 const isSidebarCapsPart = (value) => /^[A-Z][A-Z0-9_-]*[A-Z0-9]$/.test(value);
+const isGeneratedCollection = (collection) => collection.generatedSource === "response-url" || collection.name === "自动生成接口";
 
 const selectedBatchResult = computed(() =>
   batchResults.value.find((item) => item.id === selectedBatchResultId.value) || null,
@@ -2735,14 +2739,27 @@ async function executeHttp(input) {
     result = {
       status: response.status,
       statusText: response.statusText,
+      statusLine: `HTTP ${response.status} ${response.statusText}`.trimEnd(),
       durationMs: Math.round(performance.now() - started),
       size: new Blob([body]).size,
       headers: [...response.headers.entries()],
       body,
+      timings: null,
+      connection: { effectiveUrl: response.url, remoteAddress: null, localAddress: null },
     };
   }
   return {
     ...result,
+    rawRequest: result.rawRequest || [
+      `${input.method} ${input.url}`,
+      ...input.headers.map((item) => `${item.key}: ${item.value}`),
+      "",
+      input.bodyFilePath
+        ? `[Binary file: ${input.bodyFilePath}]`
+        : input.multipart.length
+          ? input.multipart.map((item) => `${item.name}=${item.kind === "file" ? `[File: ${item.value}]` : item.value}`).join("\r\n")
+          : input.body,
+    ].join("\r\n"),
     requestHeaders: input.headers.map((item) => [item.key, item.value]),
   };
 }
@@ -3049,6 +3066,11 @@ function openBatchRunner() {
   }
   selectedRequest.value.batchPlaceholderNames = [...placeholders];
   batchError.value = "";
+  const inset = window.innerWidth <= 760 ? 16 : 48;
+  batchDialogSize.width = Math.min(1320, Math.max(320, window.innerWidth - inset));
+  batchDialogSize.height = Math.min(820, Math.max(320, window.innerHeight - inset));
+  environmentMenuOpen.value = false;
+  batchEnvironmentMenuOpen.value = false;
   batchOpen.value = true;
 }
 
@@ -3215,6 +3237,10 @@ watch(
 function handleKeydown(event) {
   if (event.key === "Escape" && environmentMenuOpen.value) {
     environmentMenuOpen.value = false;
+    return;
+  }
+  if (event.key === "Escape" && batchEnvironmentMenuOpen.value) {
+    batchEnvironmentMenuOpen.value = false;
     return;
   }
   if (event.key === "Escape" && confirmDialog.open) {
@@ -3442,21 +3468,24 @@ onBeforeUnmount(() => {
         </div>
         <label class="search-box"><Search :size="15" /><input v-model="searchText" placeholder="搜索请求" /></label>
         <div class="collection-list">
-          <section v-for="collection in filteredCollections" :key="collection.id" class="collection" :class="{ 'has-selected-request': collectionRequests(collection).some((request) => request.id === workspace.selectedRequestId) }">
+          <section v-for="collection in filteredCollections" :key="collection.id" class="collection" :class="{ 'has-selected-request': collectionRequests(collection).some((request) => request.id === workspace.selectedRequestId), 'generated-collection': isGeneratedCollection(collection) }">
             <div class="collection-row" @click="toggleCollectionFromRow($event, collection)">
               <span class="collapse-button" aria-hidden="true">
                 <ChevronDown v-if="collection.expanded" :size="15" /><ChevronRight v-else :size="15" />
               </span>
               <Folder :size="16" class="folder-icon" />
-              <input
-                v-if="editingCollectionId === collection.id"
-                v-model="collection.name"
-                class="collection-name-input"
-                :data-collection-edit="collection.id"
-                @blur="finishRenameCollection(collection)"
-                @keydown.enter.prevent="$event.currentTarget.blur()"
-              />
-              <span v-else class="collection-name"><span v-for="(part, index) in sidebarNameParts(collection.name)" :key="index" :class="{ 'sidebar-caps': isSidebarCapsPart(part) }">{{ part }}</span></span>
+              <div class="collection-name-area">
+                <input
+                  v-if="editingCollectionId === collection.id"
+                  v-model="collection.name"
+                  class="collection-name-input"
+                  :data-collection-edit="collection.id"
+                  @blur="finishRenameCollection(collection)"
+                  @keydown.enter.prevent="$event.currentTarget.blur()"
+                />
+                <span v-else class="collection-name"><span v-for="(part, index) in sidebarNameParts(collection.name)" :key="index" :class="{ 'sidebar-caps': isSidebarCapsPart(part) }">{{ part }}</span></span>
+                <span v-if="isGeneratedCollection(collection)" class="generated-collection-mark" title="自动生成的接口分组" aria-label="自动生成的接口分组"><Sparkles :size="13" /></span>
+              </div>
               <span class="count">{{ collectionRequestCount(collection) }}</span>
               <button class="row-action" title="重命名集合" @click="beginRenameCollection(collection)"><Pencil :size="13" /></button>
               <button class="row-action" title="集合脚本" @click="openCollectionScript(collection)"><Code2 :size="14" /></button>
@@ -3875,10 +3904,37 @@ onBeforeUnmount(() => {
     </div>
 
     <div v-if="batchOpen" class="batch-backdrop">
-      <section class="batch-runner" role="dialog" aria-modal="true" aria-label="批量运行">
+      <button v-if="batchEnvironmentMenuOpen" class="environment-menu-backdrop" aria-label="关闭环境菜单" @click="batchEnvironmentMenuOpen = false"></button>
+      <section class="batch-runner" :style="{ width: `${batchDialogSize.width}px`, height: `${batchDialogSize.height}px` }" role="dialog" aria-modal="true" aria-label="批量运行">
         <header>
           <div><span class="eyebrow">DATA RUNNER</span><h2>批量运行</h2></div>
-          <button class="icon-button" title="关闭" :disabled="batchRunning" @click="batchOpen = false"><X :size="19" /></button>
+          <div class="batch-header-actions">
+            <div class="environment-switcher batch-environment-switcher" :style="{ '--environment-color': activeEnvironment?.color, '--environment-text': environmentTextColor(activeEnvironment?.color) }">
+              <button class="environment-trigger" type="button" :disabled="batchRunning" :aria-expanded="batchEnvironmentMenuOpen" title="切换当前环境" @click="batchEnvironmentMenuOpen = !batchEnvironmentMenuOpen">
+                <Server class="environment-server-icon" :size="14" />
+                <span class="environment-current">{{ activeEnvironment?.name }}</span>
+                <ChevronDown :size="14" />
+              </button>
+              <div v-if="batchEnvironmentMenuOpen" class="environment-menu" role="menu">
+                <div class="environment-menu-label">当前环境</div>
+                <button
+                  v-for="environment in workspace.environments"
+                  :key="environment.id"
+                  type="button"
+                  role="menuitemradio"
+                  :aria-checked="environment.id === workspace.activeEnvironmentId"
+                  :class="{ active: environment.id === workspace.activeEnvironmentId }"
+                  :style="{ '--environment-color': environment.color, '--environment-text': environmentTextColor(environment.color) }"
+                  @click="workspace.activeEnvironmentId = environment.id; batchEnvironmentMenuOpen = false"
+                >
+                  <Server class="environment-server-icon" :size="14" />
+                  <span class="environment-option-name">{{ environment.name }}</span>
+                  <Check v-if="environment.id === workspace.activeEnvironmentId" :size="14" />
+                </button>
+              </div>
+            </div>
+            <button class="icon-button" title="关闭" :disabled="batchRunning" @click="batchEnvironmentMenuOpen = false; batchOpen = false"><X :size="19" /></button>
+          </div>
         </header>
         <div class="batch-content">
           <section class="batch-input-section">
@@ -3931,6 +3987,7 @@ onBeforeUnmount(() => {
               :response="selectedBatchResult.response"
               :error-message="selectedBatchResult.error"
               :theme="workspace.appearance.mode"
+              hide-status-and-duration
               empty-text="当前批次请求执行完成后，结果会显示在这里"
               @create-request-from-url="createTemporaryRequestFromUrl"
               @open-url="openResponseUrl"

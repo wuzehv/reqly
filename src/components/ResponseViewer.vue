@@ -12,10 +12,12 @@ import {
   Clock3,
   Copy,
   ExternalLink,
+  FileText,
   Gauge,
   Maximize2,
   Minimize2,
   Plus,
+  Timer,
 } from "@lucide/vue";
 import ResponseCodeViewer from "./ResponseCodeViewer.vue";
 
@@ -26,6 +28,7 @@ const props = defineProps({
   fullscreen: { type: Boolean, default: false },
   emptyText: { type: String, default: "发送请求后，结果会显示在这里" },
   theme: { type: String, default: "light" },
+  hideStatusAndDuration: { type: Boolean, default: false },
 });
 const emit = defineEmits(["update:tab", "update:fullscreen", "create-request-from-url", "open-url"]);
 const copied = ref(false);
@@ -87,7 +90,60 @@ const responseFormatLabel = computed(() => ({
   text: "Text",
 }[responseFormat.value]));
 const requestHeaders = computed(() => props.response?.requestHeaders || []);
+const rawResponse = computed(() => {
+  if (!props.response) return "";
+  const statusLine = props.response.statusLine
+    || `HTTP ${props.response.status} ${props.response.statusText || ""}`.trimEnd();
+  const headers = (props.response.headers || [])
+    .map(([key, value]) => `${key}: ${value}`)
+    .join("\r\n");
+  const body = typeof props.response.body === "string"
+    ? props.response.body
+    : stringifyObject(props.response.body, 2);
+  const request = props.response.rawRequest?.trimEnd() || "请求报文不可用";
+  return `===== 请求报文 =====\r\n${request}\r\n\r\n===== 响应报文 =====\r\n${statusLine}\r\n${headers}\r\n\r\n${body}`;
+});
 const scriptWarnings = computed(() => props.response?.scriptWarnings || []);
+const timingStages = computed(() => {
+  const timings = props.response?.timings;
+  if (!timings) return [];
+  const definitions = [
+    ["dnsMs", "DNS 查询", "域名解析"],
+    ["tcpMs", "TCP 连接", "建立网络连接"],
+    ["sslMs", "TLS 握手", "证书校验与密钥协商"],
+    ["requestMs", "协议准备", "连接就绪到开始传输"],
+    ["waitingMs", "等待首字节", "发送请求、服务器处理与网络等待"],
+    ["downloadMs", "响应下载", "首字节到响应体接收完成"],
+  ];
+  let offset = 0;
+  const total = Math.max(Number(timings.totalMs) || 0, 0.001);
+  return definitions.map(([key, label, description], index) => {
+    const raw = timings[key];
+    const duration = raw === null || raw === undefined ? null : Math.max(Number(raw) || 0, 0);
+    const stage = {
+      key,
+      label,
+      description,
+      duration,
+      style: duration === null ? {} : {
+        left: `${Math.min(offset / total * 100, 100)}%`,
+        width: `${Math.min(duration / total * 100, 100)}%`,
+      },
+      color: index + 1,
+    };
+    if (duration !== null) offset += duration;
+    return stage;
+  });
+});
+const connectionDetails = computed(() => {
+  const connection = props.response?.connection;
+  if (!connection) return [];
+  return [
+    ["最终地址", connection.effectiveUrl],
+    ["远端地址", connection.remoteAddress],
+    ["本地地址", connection.localAddress],
+  ].filter(([, value]) => value);
+});
 const displayedErrorMessage = computed(() => props.response
   ? props.errorMessage.replace(/^Post Script 执行失败[：:]\s*/, "")
   : props.errorMessage,
@@ -206,11 +262,20 @@ function formatBytes(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function formatTiming(value) {
+  if (value === null || value === undefined) return "不可用";
+  if (value < 1) return `${value.toFixed(2)} ms`;
+  if (value < 1000) return `${value.toFixed(value < 10 ? 2 : 1)} ms`;
+  return `${(value / 1000).toFixed(2)} s`;
+}
+
 async function copyResponse() {
   if (!props.response) return;
-  const content = typeof displayedResponseBody.value === "string"
-    ? displayedResponseBody.value
-    : stringifyObject(displayedResponseBody.value, 2);
+  const content = activeTab.value === "raw"
+    ? rawResponse.value
+    : typeof displayedResponseBody.value === "string"
+      ? displayedResponseBody.value
+      : stringifyObject(displayedResponseBody.value, 2);
   await navigator.clipboard.writeText(content);
   copied.value = true;
   window.setTimeout(() => (copied.value = false), 1200);
@@ -229,18 +294,22 @@ onBeforeUnmount(() => window.removeEventListener("keydown", handleEscape));
   <section class="response-viewer" :class="{ fullscreen: isFullscreen }">
     <div class="response-heading">
       <nav class="tabs response-tabs">
+        <button :class="{ active: activeTab === 'body' }" @click="activeTab = 'body'"><Braces :size="14" />响应体</button>
+        <button :class="{ active: activeTab === 'timing' }" @click="activeTab = 'timing'"><Timer :size="14" />耗时</button>
         <button :class="{ active: activeTab === 'request-headers' }" @click="activeTab = 'request-headers'"><ArrowUpRight :size="14" />请求头 <span v-if="response" class="tab-count">{{ requestHeaders.length }}</span></button>
         <button :class="{ active: activeTab === 'headers' }" @click="activeTab = 'headers'"><ArrowDownLeft :size="14" />响应头 <span v-if="response" class="tab-count">{{ response.headers.length }}</span></button>
-        <button :class="{ active: activeTab === 'body' }" @click="activeTab = 'body'"><Braces :size="14" />响应体</button>
+        <button :class="{ active: activeTab === 'raw' }" @click="activeTab = 'raw'"><FileText :size="14" />原始报文</button>
       </nav>
       <div v-if="response" class="response-meta">
         <button v-if="activeTab === 'body' && responseFormat === 'json' && jsonHasContainers" class="json-view-command" :title="jsonRootCollapsed ? '全部展开' : '全部折叠'" @click="setAllJsonCollapsed(!jsonRootCollapsed)"><ChevronDown v-if="jsonRootCollapsed" :size="13" /><ChevronRight v-else :size="13" />{{ jsonRootCollapsed ? '展开' : '折叠' }}</button>
         <span v-if="activeTab === 'body'" class="response-format">{{ responseFormatLabel }}</span>
-        <span :class="statusClass">{{ response.status }} {{ response.statusText }}</span>
-        <span><Clock3 :size="13" />{{ response.durationMs }} ms</span>
+        <span v-if="!hideStatusAndDuration" class="response-status" :class="statusClass">{{ response.status }} {{ response.statusText }}</span>
+        <span v-if="!hideStatusAndDuration" class="response-duration"><Clock3 :size="13" />{{ response.durationMs }} ms</span>
         <span><Gauge :size="13" />{{ formatBytes(response.size) }}</span>
-        <button class="icon-button small" :title="copied ? '已复制' : '复制响应'" @click="copyResponse"><Check v-if="copied" :size="15" /><Copy v-else :size="15" /></button>
-        <button class="icon-button small" :title="isFullscreen ? '退出全屏' : '全屏查看'" @click="isFullscreen = !isFullscreen"><Minimize2 v-if="isFullscreen" :size="15" /><Maximize2 v-else :size="15" /></button>
+        <div v-if="activeTab === 'body'" class="response-actions">
+          <button class="icon-button small" :title="copied ? '已复制' : '复制响应'" @click="copyResponse"><Check v-if="copied" :size="15" /><Copy v-else :size="15" /></button>
+          <button class="icon-button small" :title="isFullscreen ? '退出全屏' : '全屏查看'" @click="isFullscreen = !isFullscreen"><Minimize2 v-if="isFullscreen" :size="15" /><Maximize2 v-else :size="15" /></button>
+        </div>
       </div>
     </div>
     <div v-if="scriptWarnings.length" class="pre-script-warning-state" :title="scriptWarnings.join('\n')"><AlertTriangle :size="14" /><strong>Pre Script 环境变量警告</strong><span>{{ scriptWarnings.join('；') }}</span></div>
@@ -259,6 +328,26 @@ onBeforeUnmount(() => window.removeEventListener("keydown", handleEscape));
         </div>
       </div>
       <ResponseCodeViewer v-else-if="activeTab === 'body'" :key="`${responseFormat}-${theme}`" :content="displayedResponseBody" :language="responseFormat" :theme="theme" @url-click="showUrlMenu" />
+      <ResponseCodeViewer v-else-if="activeTab === 'raw'" :key="`raw-${theme}`" :content="rawResponse" language="text" :theme="theme" @url-click="showUrlMenu" />
+      <div v-else-if="activeTab === 'timing'" class="response-timing">
+        <div v-if="response.timings" class="timing-summary">
+          <div><span>总耗时</span><strong>{{ formatTiming(response.timings.totalMs) }}</strong></div>
+          <div><span>首字节</span><strong>{{ formatTiming(response.timings.totalMs - response.timings.downloadMs) }}</strong></div>
+          <div><span>重定向</span><strong>{{ response.timings.redirectCount ? `${response.timings.redirectCount} 次 / ${formatTiming(response.timings.redirectMs)}` : '无' }}</strong></div>
+        </div>
+        <div v-if="timingStages.length" class="timing-waterfall">
+          <div v-for="stage in timingStages" :key="stage.key" class="timing-row">
+            <div class="timing-label"><strong>{{ stage.label }}</strong><span>{{ stage.description }}</span></div>
+            <div class="timing-track"><span v-if="stage.duration !== null" :class="`timing-color-${stage.color}`" :style="stage.style"></span></div>
+            <code>{{ formatTiming(stage.duration) }}</code>
+          </div>
+        </div>
+        <div v-else class="timing-unavailable">当前运行模式无法读取底层网络阶段耗时。</div>
+        <div v-if="connectionDetails.length" class="timing-connection">
+          <h3>连接信息</h3>
+          <div v-for="([label, value]) in connectionDetails" :key="label"><strong>{{ label }}</strong><span>{{ value }}</span></div>
+        </div>
+      </div>
       <div v-else-if="activeTab === 'request-headers'" class="response-headers"><div v-for="([key, value], index) in requestHeaders" :key="`${key}-${index}`"><strong>{{ key }}</strong><span>{{ value }}</span></div></div>
       <div v-else class="response-headers"><div v-for="([key, value], index) in response.headers" :key="`${key}-${index}`"><strong>{{ key }}</strong><span>{{ value }}</span></div></div>
     </template>
