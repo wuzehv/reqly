@@ -120,7 +120,8 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 .subcollection-row:hover { border-color: #bbc6cc; background: #e6ebed; }
 .subcollection.active > .subcollection-row { border-color: color-mix(in srgb, var(--accent) 40%, #d5dde1); box-shadow: inset 2px 0 var(--accent); color: var(--text); }
 .subcollection-row .folder-icon { margin-right: 7px; }
-.subcollection-row .count { min-width: 20px; height: 18px; border-color: #c4cdd2; padding: 0 5px; background: #f2f4f5; font-size: 11px; }
+.subcollection-row > .collection-name { flex: 1; }
+.subcollection-row .count { min-width: 20px; height: 18px; margin-right: 52px; border-color: #c4cdd2; padding: 0 5px; background: #f2f4f5; font-size: 11px; }
 .subrequest-list { display: flex; flex-direction: column; gap: 3px; margin: 3px 0 0 13px; padding: 0 0 0 8px; border-left: 1px solid var(--line); }
 .request-item { position: relative; width: 100%; height: 32px; display: grid; grid-template-columns: 43px minmax(0, 1fr) 108px; align-items: center; border: 0; border-radius: 4px; padding: 0 3px 0 7px; background: transparent; cursor: pointer; text-align: left; font: 400 13px/1.2 var(--font-sidebar); letter-spacing: 0; }
 .request-item:hover { background: #222529; }
@@ -159,7 +160,7 @@ body.dragging-request.request-drag-blocked, body.dragging-request.request-drag-b
 .archive-heading { width: 100%; height: 27px; display: flex; align-items: center; gap: 5px; border: 1px solid #d5dde1; border-radius: 4px; padding: 0 6px; color: #59666f; background: #eef1f3; font-size: 11px; cursor: pointer; transition: border-color .15s, background .15s; }
 .archive-heading:hover { border-color: #bbc6cc; color: #59666f; background: #e6ebed; }
 .archive-section.active > .archive-heading { border-color: color-mix(in srgb, var(--accent) 40%, #d5dde1); color: var(--text); background: color-mix(in srgb, var(--accent) 7%, var(--panel)); box-shadow: inset 2px 0 var(--accent); }
-.archive-count { min-width: 20px; height: 18px; display: inline-grid; place-items: center; flex: 0 0 auto; margin-right: 96px; margin-left: auto; border: 1px solid #c4cdd2; border-radius: 4px; padding: 0 5px; color: #66737c; background: #f2f4f5; font: 600 11px/1 var(--font-mono); }
+.archive-count { min-width: 20px; height: 18px; display: inline-grid; place-items: center; flex: 0 0 auto; margin-right: 145px; margin-left: auto; border: 1px solid #c4cdd2; border-radius: 4px; padding: 0 5px; color: #66737c; background: #f2f4f5; font: 600 11px/1 var(--font-mono); }
 .archive-list { display: flex; flex-direction: column; gap: 2px; border-left: 1px solid var(--line); padding: 3px 0 0 8px; }
 .archive-list .request-item { height: 28px; grid-template-columns: 43px minmax(0, 1fr) 48px; }
 .archive-list .request-item-name { font-size: 12px; font-weight: 400; }
