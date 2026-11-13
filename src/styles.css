@@ -547,6 +547,10 @@ input[type="checkbox"] { width: 13px; height: 13px; margin: 0 0 0 5px; accent-co
 .script-editor-host .cm-content { user-select: text; }
 .script-editor-host .cm-selectionBackground { background: #b8d7f0 !important; }
 .script-editor-host .cm-content ::selection { background: #b8d7f0 !important; }
+.request-script-editor > .script-editor-shell,
+.template-editor-pane > .script-editor-shell { border-color: #d7dde1; }
+.request-script-editor > .script-editor-shell:focus-within,
+.template-editor-pane > .script-editor-shell:focus-within { border-color: #b5bec4; }
 .script-console { flex: 0 0 auto; max-height: 130px; overflow: auto; margin-top: 10px; border: 1px solid #c5ced3; border-radius: 4px; background: #e9edef; font: 11px/1.5 var(--font-mono); }
 .script-console-title { position: sticky; top: 0; padding: 5px 9px; border-bottom: 1px solid #cbd2d7; color: #65717a; background: #e4e9eb; font-family: inherit; font-weight: 600; }
 .script-console-line { display: grid; grid-template-columns: 88px 1fr; gap: 8px; padding: 4px 9px; border-bottom: 1px solid #dce2e5; color: #34414a; }
@@ -965,10 +969,14 @@ input[type="checkbox"] { width: 13px; height: 13px; margin: 0 0 0 5px; accent-co
 .theme-dark .settings-panel { border-color: #454b51; background: #23262a; box-shadow: 0 18px 60px rgba(0, 0, 0, .38); }
 .theme-dark .script-editor-shell { border-color: #42484e; background: #191b1e; }
 .theme-dark .body-editor > .script-editor-shell { border-color: #30353a; }
+.theme-dark .request-script-editor > .script-editor-shell,
+.theme-dark .template-editor-pane > .script-editor-shell { border-color: #30353a; }
 .theme-dark .script-editor-toolbar { border-bottom-color: #3b4147; background: #272b2f; }
 .theme-dark .script-editor-host { background: #191b1e; }
 .theme-dark .script-editor-shell:focus-within { border-color: #68717a; }
 .theme-dark .body-editor > .script-editor-shell:focus-within { border-color: #4b5259; }
+.theme-dark .request-script-editor > .script-editor-shell:focus-within,
+.theme-dark .template-editor-pane > .script-editor-shell:focus-within { border-color: #4b5259; }
 .theme-dark .script-editor-host .cm-selectionBackground,
 .theme-dark .script-editor-host .cm-content ::selection { background: #46617c !important; }
 .theme-dark .script-kind-tabs button { color: #959ca4; }
