@@ -479,9 +479,15 @@ input[type="checkbox"] { width: 13px; height: 13px; margin: 0 0 0 5px; accent-co
 .collection-script-header > span { color: var(--muted); font-size: 12px; }
 .collection-script-content { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px; padding: 16px 22px 12px; }
 .profile-binding-bar, .profile-meta-bar { min-height: 38px; display: flex; align-items: center; gap: 10px; }
+.profile-binding-bar { flex-wrap: wrap; }
 .profile-binding-bar { border-bottom: 1px solid var(--line-soft); padding-bottom: 12px; }
 .profile-binding-bar label, .profile-meta-bar label { min-width: 0; display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
 .profile-binding-bar select { width: min(320px, 40vw); height: 32px; border: 1px solid var(--line); border-radius: 4px; padding: 0 30px 0 9px; color: var(--text); background: var(--panel); }
+.profile-binding-bar .cookie-policy-field select { width: 170px; }
+.request-cookie-policy { min-height: 40px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--line-soft); padding: 4px 0 10px; color: var(--muted); font-size: 11px; }
+.request-cookie-policy label { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.request-cookie-policy select { height: 29px; border: 1px solid var(--line); border-radius: 4px; padding: 0 28px 0 8px; color: var(--text); background: var(--panel); font-size: 12px; }
+.request-cookie-policy > span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .profile-create-button { display: inline-flex; align-items: center; gap: 5px; }
 .profile-meta-bar { min-height: 32px; }
 .profile-meta-bar label { flex: 1; }

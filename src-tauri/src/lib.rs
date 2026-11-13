@@ -2,13 +2,21 @@ use curl::easy::{Easy, Form, InfoType, List, SslOpt};
 use http::{HeaderName, HeaderValue, Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::BTreeSet, fs, net::IpAddr, path::Path, time::Duration};
+use std::{
+    collections::{BTreeSet, HashMap},
+    fs,
+    net::IpAddr,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock},
+    time::Duration,
+};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 mod mcp;
 mod storage;
 
 const RAW_REQUEST_CAPTURE_LIMIT: usize = 1024 * 1024;
+static COOKIE_JAR_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -37,6 +45,8 @@ pub(crate) struct RequestInput {
     pub(crate) body_file_path: Option<String>,
     #[serde(default)]
     pub(crate) multipart: Vec<MultipartField>,
+    #[serde(default)]
+    pub(crate) cookie_scope: Option<String>,
     pub(crate) proxy: ProxyConfig,
 }
 
@@ -57,6 +67,7 @@ pub(crate) struct ResponseOutput {
     raw_request: String,
     duration_ms: u128,
     size: usize,
+    request_headers: Vec<(String, String)>,
     headers: Vec<(String, String)>,
     body: String,
     timings: ResponseTimings,
@@ -120,6 +131,36 @@ fn append_capped(target: &mut Vec<u8>, data: &[u8], truncated: &mut bool) {
     if length < data.len() {
         *truncated = true;
     }
+}
+
+fn cookie_jar_path(app: &AppHandle, scope: &str) -> Result<PathBuf, String> {
+    let file_name = scope
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if file_name.is_empty() {
+        return Err("Cookie 作用域无效".into());
+    }
+    let directory = storage::app_data_dir(app)?.join("cookies");
+    fs::create_dir_all(&directory).map_err(|error| format!("创建 Cookie 存储目录失败：{error}"))?;
+    Ok(directory.join(format!("{file_name}.txt")))
+}
+
+fn cookie_jar_lock(path: &Path) -> Result<Arc<Mutex<()>>, String> {
+    let mut locks = COOKIE_JAR_LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .map_err(|_| "Cookie 存储锁不可用".to_string())?;
+    Ok(locks
+        .entry(path.to_path_buf())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone())
 }
 
 #[tauri::command]
@@ -240,20 +281,35 @@ async fn import_artifact(
     .map_err(|error| error.to_string())?
 }
 
-pub(crate) async fn execute_request(input: RequestInput) -> Result<ResponseOutput, String> {
-    tauri::async_runtime::spawn_blocking(move || execute_request_blocking(input))
+pub(crate) async fn execute_request(
+    input: RequestInput,
+    cookie_path: Option<PathBuf>,
+) -> Result<ResponseOutput, String> {
+    tauri::async_runtime::spawn_blocking(move || execute_request_blocking(input, cookie_path))
         .await
         .map_err(|error| error.to_string())?
 }
 
-fn execute_request_blocking(input: RequestInput) -> Result<ResponseOutput, String> {
+fn execute_request_blocking(
+    input: RequestInput,
+    cookie_path: Option<PathBuf>,
+) -> Result<ResponseOutput, String> {
     let method = Method::from_bytes(input.method.as_bytes()).map_err(|error| error.to_string())?;
+    let cookie_lock = cookie_path.as_deref().map(cookie_jar_lock).transpose()?;
+    let _cookie_guard = cookie_lock
+        .as_deref()
+        .map(|lock| lock.lock().map_err(|_| "Cookie 存储锁不可用".to_string()))
+        .transpose()?;
     let mut easy = Easy::new();
     easy.url(input.url.trim()).map_err(request_error)?;
     easy.follow_location(true).map_err(request_error)?;
     easy.max_redirections(10).map_err(request_error)?;
     easy.accept_encoding("").map_err(request_error)?;
     easy.verbose(true).map_err(request_error)?;
+    if let Some(path) = cookie_path.as_deref() {
+        easy.cookie_file(path).map_err(request_error)?;
+        easy.cookie_jar(path).map_err(request_error)?;
+    }
 
     if input.proxy.enabled {
         if input.proxy.url.trim().is_empty() {
@@ -358,6 +414,7 @@ fn execute_request_blocking(input: RequestInput) -> Result<ResponseOutput, Strin
     }
 
     let mut response_body = Vec::new();
+    let mut request_headers = Vec::new();
     let mut response_headers = Vec::new();
     let mut status_text = String::new();
     let mut status_line = String::new();
@@ -367,7 +424,21 @@ fn execute_request_blocking(input: RequestInput) -> Result<ResponseOutput, Strin
         let mut transfer = easy.transfer();
         transfer
             .debug_function(|kind, data| match kind {
-                InfoType::HeaderOut | InfoType::DataOut => {
+                InfoType::HeaderOut => {
+                    append_capped(&mut raw_request, data, &mut raw_request_truncated);
+                    for line in String::from_utf8_lossy(data).lines() {
+                        let line = line.trim_end_matches('\r');
+                        if line.rsplit_once(" HTTP/").is_some() {
+                            request_headers.clear();
+                        } else if let Some(colon) = line.find(':') {
+                            request_headers.push((
+                                line[..colon].trim().to_string(),
+                                line[colon + 1..].trim().to_string(),
+                            ));
+                        }
+                    }
+                }
+                InfoType::DataOut => {
                     append_capped(&mut raw_request, data, &mut raw_request_truncated);
                 }
                 _ => {}
@@ -462,6 +533,7 @@ fn execute_request_blocking(input: RequestInput) -> Result<ResponseOutput, Strin
         raw_request,
         duration_ms: total_ms.round() as u128,
         size,
+        request_headers,
         headers: response_headers,
         body: String::from_utf8_lossy(&response_body).into_owned(),
         timings: ResponseTimings {
@@ -484,8 +556,26 @@ fn execute_request_blocking(input: RequestInput) -> Result<ResponseOutput, Strin
 }
 
 #[tauri::command]
-async fn send_request(input: RequestInput) -> Result<ResponseOutput, String> {
-    execute_request(input).await
+async fn send_request(app: AppHandle, input: RequestInput) -> Result<ResponseOutput, String> {
+    let cookie_path = input
+        .cookie_scope
+        .as_deref()
+        .filter(|scope| !scope.trim().is_empty())
+        .map(|scope| cookie_jar_path(&app, scope))
+        .transpose()?;
+    execute_request(input, cookie_path).await
+}
+
+#[tauri::command]
+fn clear_cookie_scope(app: AppHandle, scope: String) -> Result<(), String> {
+    let path = cookie_jar_path(&app, scope.trim())?;
+    let lock = cookie_jar_lock(&path)?;
+    let _guard = lock.lock().map_err(|_| "Cookie 存储锁不可用".to_string())?;
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("清空 Cookie 失败：{error}")),
+    }
 }
 
 #[cfg(feature = "desktop")]
@@ -534,6 +624,7 @@ pub fn run() {
             search_requests,
             save_request,
             send_request,
+            clear_cookie_scope,
             configure_mcp,
             get_mcp_status,
             complete_mcp_request,

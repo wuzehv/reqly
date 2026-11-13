@@ -130,6 +130,7 @@ const makeRequest = (name = "新请求", url = "") => ({
   postScript: defaultPostScript,
   batchData: "",
   batchPlaceholderNames: [],
+  cookieMode: "inherit",
   pinned: false,
 });
 
@@ -137,7 +138,7 @@ const defaultWorkspace = () => {
   const request = makeRequest("示例请求", "https://httpbin.org/get");
   const environmentId = uid();
   return {
-    collections: [{ id: uid(), name: "我的接口", expanded: true, preScriptProfileId: "", preScriptPlaceholders: [], requests: [request], requestCount: 1, requestsLoaded: true, groups: [] }],
+    collections: [{ id: uid(), name: "我的接口", expanded: true, cookiePolicy: "environment", preScriptProfileId: "", preScriptPlaceholders: [], requests: [request], requestCount: 1, requestsLoaded: true, groups: [] }],
     preScriptProfiles: [],
     selectedRequestId: request.id,
     variables: [],
@@ -583,6 +584,7 @@ function normalizeRequest(request, inheritedPostScript = defaultPostScript) {
   request.postScript ??= inheritedPostScript || defaultPostScript;
   request.batchData ??= "";
   request.batchPlaceholderNames ??= [];
+  request.cookieMode = ["inherit", "disabled", "manual"].includes(request.cookieMode) ? request.cookieMode : "inherit";
   return request;
 }
 
@@ -949,7 +951,7 @@ const selectedBatchResult = computed(() =>
 );
 
 function addCollection() {
-  const collection = { id: uid(), name: `新集合 ${workspace.collections.length + 1}`, expanded: true, preScriptProfileId: "", preScriptPlaceholders: [], requests: [], requestCount: 0, requestsLoaded: true, groups: [] };
+  const collection = { id: uid(), name: `新集合 ${workspace.collections.length + 1}`, expanded: true, cookiePolicy: "environment", preScriptProfileId: "", preScriptPlaceholders: [], requests: [], requestCount: 0, requestsLoaded: true, groups: [] };
   workspace.collections.push(collection);
   beginRenameCollection(collection);
 }
@@ -982,6 +984,7 @@ async function createTemporaryRequestFromUrl(url) {
       expanded: true,
       archiveExpanded: false,
       generatedSource: "response-url",
+      cookiePolicy: "environment",
       preScriptProfileId: "",
       preScriptPlaceholders: [],
       requests: [],
@@ -1842,6 +1845,7 @@ function normalizeWorkspace(saved) {
   saved.collections.forEach((collection) => {
     collection.expanded ??= true;
     collection.archiveExpanded ??= false;
+    collection.cookiePolicy = ["environment", "isolated", "disabled"].includes(collection.cookiePolicy) ? collection.cookiePolicy : "environment";
     collection.requests ||= [];
     collection.requestCount ??= collection.requests.length;
     collection.requestsLoaded ??= !isTauri();
@@ -2081,6 +2085,7 @@ async function openArtifactImport() {
 function cloneImportedRequest(source) {
   if (!source || typeof source !== "object" || typeof source.name !== "string") throw new Error("接口数据格式无效");
   const request = { ...makeRequest(source.name, source.url || ""), ...cloneData(source), id: uid() };
+  request.cookieMode = ["inherit", "disabled", "manual"].includes(request.cookieMode) ? request.cookieMode : "inherit";
   for (const field of ["params", "headers", "formBody", "formData"]) {
     request[field] = (request[field] || []).map((item) => ({ ...item, id: uid() }));
     if (!request[field].length) request[field].push(pair());
@@ -2194,6 +2199,7 @@ async function cloneImportedCollection(source, progress, preScriptStrategy = "cr
     name: `${source.name} 副本`,
     expanded: true,
     archiveExpanded: false,
+    cookiePolicy: ["environment", "isolated", "disabled"].includes(source.cookiePolicy) ? source.cookiePolicy : "environment",
     preScriptProfileId: importedPreScriptBinding(source, "", preScriptStrategy),
     preScriptPlaceholders: importedPreScriptPlaceholders(source),
     requests: [],
@@ -2247,7 +2253,7 @@ async function importArtifactFile(event) {
     if (payload?.format === "reqly-request") {
       let target = targetGroup || workspace.collections[0];
       if (!target) {
-        target = { id: uid(), name: "我的接口", expanded: true, preScriptProfileId: "", preScriptPlaceholders: [], requests: [], requestCount: 0, requestsLoaded: true, groups: [] };
+        target = { id: uid(), name: "我的接口", expanded: true, cookiePolicy: "environment", preScriptProfileId: "", preScriptPlaceholders: [], requests: [], requestCount: 0, requestsLoaded: true, groups: [] };
         workspace.collections.push(target);
       }
       const request = cloneImportedRequest(payload.data);
@@ -2715,6 +2721,72 @@ function prepareInput(request, variables) {
   };
 }
 
+function collectionCookiePolicy(group) {
+  const collection = parentCollectionForGroup(group) || group;
+  return ["environment", "isolated", "disabled"].includes(collection?.cookiePolicy)
+    ? collection.cookiePolicy
+    : "environment";
+}
+
+function cookieScopeForGroup(group, environmentId = workspace.activeEnvironmentId) {
+  const policy = collectionCookiePolicy(group);
+  if (policy === "disabled") return null;
+  const collection = parentCollectionForGroup(group) || group;
+  return policy === "isolated" && collection?.id
+    ? `collection:${environmentId}:${collection.id}`
+    : `environment:${environmentId}`;
+}
+
+function applyCookiePolicy(input, request, group, environmentId) {
+  const requestMode = ["inherit", "disabled", "manual"].includes(request.cookieMode)
+    ? request.cookieMode
+    : "inherit";
+  const cookieHeader = input.headers.some((item) => item.key.trim().toLowerCase() === "cookie");
+  input.cookieScope = null;
+  if (requestMode === "disabled") {
+    input.headers = input.headers.filter((item) => item.key.trim().toLowerCase() !== "cookie");
+    return input;
+  }
+  if (requestMode === "manual") return input;
+
+  const policy = collectionCookiePolicy(group);
+  if (policy === "disabled") {
+    input.headers = input.headers.filter((item) => item.key.trim().toLowerCase() !== "cookie");
+    return input;
+  }
+  if (cookieHeader) return input;
+  input.cookieScope = cookieScopeForGroup(group, environmentId);
+  return input;
+}
+
+function cookieModeDescription(request, group) {
+  if (request?.cookieMode === "disabled") return "当前请求不发送 Cookie";
+  if (request?.cookieMode === "manual") return "仅发送请求头中手动填写的 Cookie";
+  const policy = collectionCookiePolicy(group);
+  if (policy === "disabled") return "当前分组已禁用 Cookie";
+  return policy === "isolated" ? "使用当前环境下的分组独立 Cookie" : "使用当前环境共享 Cookie";
+}
+
+async function clearCollectionCookies(collection) {
+  const scope = cookieScopeForGroup(collection);
+  if (!scope) return;
+  const shared = collectionCookiePolicy(collection) === "environment";
+  const confirmed = await askConfirm({
+    title: "清空 Cookie",
+    message: shared
+      ? `将清空“${activeEnvironment.value?.name}”环境共享的全部 Cookie，其他继承该环境 Cookie 的分组也会受到影响。`
+      : `将清空“${collection.name}”在“${activeEnvironment.value?.name}”环境下的独立 Cookie。`,
+    confirmLabel: "清空",
+  });
+  if (!confirmed) return;
+  if (!isTauri()) {
+    showNotice("Cookie Jar 仅支持 Reqly 桌面端");
+    return;
+  }
+  await invoke("clear_cookie_scope", { scope });
+  showNotice(shared ? "已清空当前环境 Cookie" : "已清空当前分组 Cookie");
+}
+
 async function executeHttp(input) {
   let result;
   if (isTauri()) {
@@ -2760,16 +2832,16 @@ async function executeHttp(input) {
           ? input.multipart.map((item) => `${item.name}=${item.kind === "file" ? `[File: ${item.value}]` : item.value}`).join("\r\n")
           : input.body,
     ].join("\r\n"),
-    requestHeaders: input.headers.map((item) => [item.key, item.value]),
+    requestHeaders: result.requestHeaders?.length ? result.requestHeaders : input.headers.map((item) => [item.key, item.value]),
   };
 }
 
-async function sendSandboxRequest(nestedRequest, variables = activeEnvironmentVariables.value) {
+async function sendSandboxRequest(nestedRequest, variables = activeEnvironmentVariables.value, group = selectedRequestGroup.value, environmentId = workspace.activeEnvironmentId) {
   appendConsole({ phase: "request", level: "info", args: [`${nestedRequest.method} ${nestedRequest.url}`] });
-  const result = await executeHttp({
-    ...prepareInput({ ...nestedRequest, params: [] }, variablesMapFrom(variables)),
-    proxy: cloneData(workspace.proxy),
-  });
+  const source = { ...nestedRequest, params: [], cookieMode: nestedRequest.cookieMode || "inherit" };
+  const input = applyCookiePolicy(prepareInput(source, variablesMapFrom(variables)), source, group, environmentId);
+  input.proxy = cloneData(workspace.proxy);
+  const result = await executeHttp(input);
   appendConsole({ phase: "response", level: result.status >= 400 ? "error" : "info", args: [`HTTP ${result.status} ${result.statusText}`, `${result.durationMs} ms`] });
   return {
     code: result.status,
@@ -2807,11 +2879,12 @@ async function buildInput(source, variables, persistVariables = true, group = se
     request: cloneData(source),
     variables,
     onConsole: (entry) => appendConsole({ phase: "pre", ...entry }),
-    onRequest: (request) => sendSandboxRequest(request, variables),
+    onRequest: (request) => sendSandboxRequest(request, variables, group, environmentId),
   });
   if (persistVariables) applyScriptVariables(execution.variables, environmentId);
+  const input = prepareInput(execution.request, variablesMapFrom(execution.variables));
   return {
-    input: prepareInput(execution.request, variablesMapFrom(execution.variables)),
+    input: applyCookiePolicy(input, execution.request, group, environmentId),
     request: execution.request,
     variables: execution.variables,
     warnings: resolvedPreScript.warnings,
@@ -3670,6 +3743,15 @@ onBeforeUnmount(() => {
                 <option v-for="profile in workspace.preScriptProfiles" :key="profile.id" :value="profile.id">{{ profile.name }}</option>
               </select>
             </label>
+            <label class="cookie-policy-field">
+              <span>Cookie 范围</span>
+              <select v-model="scriptCollection.cookiePolicy">
+                <option value="environment">继承当前环境</option>
+                <option value="isolated">分组独立</option>
+                <option value="disabled">禁用 Cookie</option>
+              </select>
+            </label>
+            <button class="dialog-button" :disabled="scriptCollection.cookiePolicy === 'disabled'" @click="clearCollectionCookies(scriptCollection)">清空当前 Cookie</button>
             <button class="dialog-button profile-create-button" @click="openPreScriptTemplateManager"><Code2 :size="14" />管理模板</button>
           </div>
           <div class="replacement-heading">
@@ -3746,6 +3828,17 @@ onBeforeUnmount(() => {
           </nav>
 
           <div class="request-panel">
+            <div v-if="activeTab === 'headers'" class="request-cookie-policy">
+              <label>
+                <span>Cookie</span>
+                <select v-model="selectedRequest.cookieMode">
+                  <option value="inherit">继承分组策略</option>
+                  <option value="disabled">当前请求禁用</option>
+                  <option value="manual">仅使用手动 Cookie</option>
+                </select>
+              </label>
+              <span>{{ cookieModeDescription(selectedRequest, selectedRequestGroup) }}</span>
+            </div>
             <div v-if="activeTab === 'params' || activeTab === 'headers'" class="kv-editor">
               <div class="kv-head"><span></span><span>KEY</span><span>VALUE</span><span></span></div>
               <div v-for="(item, index) in activeTab === 'params' ? selectedRequest.params : selectedRequest.headers" :key="item.id" class="kv-row">

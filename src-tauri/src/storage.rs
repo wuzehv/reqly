@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 const SCHEMA_VERSION: i64 = 3;
 
-fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let directory = app
         .path()
         .app_data_dir()

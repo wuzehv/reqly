@@ -797,6 +797,7 @@ fn create_collection(app: &AppHandle, arguments: &Value) -> Result<Value, String
     let mut workspace = load_workspace(app)?;
     let collection = json!({
         "id": Uuid::new_v4().to_string(), "name": name, "expanded": true,
+        "cookiePolicy": "environment",
         "preScriptProfileId": "", "preScriptPlaceholders": [], "requests": [], "requestCount": 0,
         "requestsLoaded": true, "groups": []
     });
@@ -880,6 +881,7 @@ fn create_request(app: &AppHandle, arguments: &Value) -> Result<Value, String> {
         "postScript": post_script,
         "batchData": "",
         "batchPlaceholderNames": [],
+        "cookieMode": "inherit",
         "pinned": false, "archived": false
     });
     let mut workspace = load_workspace(app)?;
